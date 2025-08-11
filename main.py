@@ -294,9 +294,3 @@ if __name__ == "__main__":
     plt.grid(True)  # сітка
     plt.legend()  # легенда
     plt.show()  # показати графік
-
-
-
-
-
-
