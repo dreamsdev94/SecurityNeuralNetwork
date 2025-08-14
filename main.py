@@ -1,6 +1,9 @@
 import numpy as np
 import math
 import matplotlib.pyplot as plt
+import data_utils
+from data_utils import create_dataset
+
 
 # Клас нейрону
 class Neuron:
@@ -268,19 +271,15 @@ class Network:
         print(str(accuracy) + " %")
 
 if __name__ == "__main__":
-    network = Network(2)
-    network.set_layers([16, 14, 12, 10, 8, 6, 4, 2, 2])
-    signals = np.array([1,0])
-    sets = np.array([[0,0], [0,1], [0,2],[0,3],[1,0],[1,1],[1,2],[1,3],[2,0],[2,1],[2,2],[2,3],[3,0],[3,1],[3,2],[3,3]])
-    targets = [[1,1],[1,1],[1,1],[1,1],[-1,-1],[1,1],[-1,-1],[1,1],[-1,-1],[-1,-1],[1,1],[1,1],[-1,-1],[-1,-1],[-1,-1],[1,1]]
 
+    sets, targets = create_dataset("Train_Test_Windows_10.csv")
 
-    # targets = [[1],[1],[1],[1],[0],[1],[0],[1],[0],[0],[1],[1],[0],[0],[0],[1]]
-    # targets = [[1],[1],[1],[1],[-1],[1],[-1],[1],[-1],[-1],[1],[1],[-1],[-1],[-1],[1]]
-    network.learn_online(sets,targets,1000,0.01)
+    in_amount = len(sets[0])
 
-    for data in sets:
-        print(data, ' - ', network.get_round_outputs(data))
+    network = Network(in_amount)
+    network.set_layers([100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 1])
+
+    network.learn_online(sets, targets, 1000, 0.01)
 
     network.check_network(sets, targets)
 
