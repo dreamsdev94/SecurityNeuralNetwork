@@ -1,23 +1,23 @@
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-import data_utils
 from data_utils import create_dataset
+import json
 
 
 # Клас нейрону
 class Neuron:
-    def __init__(self, input_size):
+    def __init__(self, input_size, neuron_data = None):
         self.size = input_size                      # Кількість вхідних сигналів нейрону
         self.layer = None                           # Шар, до якого належить екземпляр нейрону
         self.inputs = None                          # Вхідні сигнали нейрону
         self.inputs_grad = None                     # Локальні градієнти вхідних сигналів
         self.inputs_global_grads = None             # Глобальні градієнти вхідних сигналів
         self.output = None                          # Вихідний сигнал нейрону
-        self.weights = np.random.uniform(-1, 1, self.size)
+        self.weights = np.random.uniform(-1, 1, self.size) if neuron_data is None else neuron_data['weights']
         self.weights_grads = None                   # Локальні градієнти ваг нейрону
         self.global_weights_grads = None            # Глобальні градієнти ваг
-        self.bias = 0                               # Біас нейрону
+        self.bias = 0 if neuron_data is None else neuron_data['bias']  # Біас нейрону
         self.bias_grad = 1                          # Локальний градієнт біаса
         self.global_bias_grad = None                # Глобальний градієнт біаса
         self.global_output_grad = 0.0                 # Глобальний градієнт вихідного сигналу
@@ -59,7 +59,7 @@ class Neuron:
 
 # Клас шару нейронів
 class Layer:
-    def __init__(self, neurons_amount: int, neurons_size: int):
+    def __init__(self, neurons_amount: int, neurons_size: int, layer_data = None):
         self.neurons_amount = neurons_amount                    # Кількість нейронів в шарі
         self.neurons_size = neurons_size                        # Кількість вхідних сигналів нейронів
         self.neurons = list()                                   # Список нейронів шару
@@ -67,8 +67,8 @@ class Layer:
         self.next = None                                        # Посилання на наступний шар
 
         # Заповнення шару нейронами
-        for _ in range(self.neurons_amount):
-            neuron = Neuron(self.neurons_size)                  # Створення екземпляру нейрону
+        for i in range(self.neurons_amount):
+            neuron = Neuron(self.neurons_size, None if layer_data is None else layer_data[i])                 # Створення екземпляру нейрону
             neuron.layer = self                                 # Позначення поточного шару як шару нейрона
             self.neurons.append(neuron)                         # Додавання нейрону до списку нейронів шару
 
@@ -88,6 +88,7 @@ class Layer:
 # Клас нейронної мережі
 class Network:
     def __init__(self, input_size):
+        self.model = None
         self.input_size = input_size                            # Кількість вхідних сигналів нейромережі
         self.layers = list()                                    # Список шарів нейронів
         self.inputs = None                                      # Список вхідних сигналів
@@ -95,14 +96,14 @@ class Network:
         self.average_losses = None
 
     # Метод заповнення нейромережі шарами та нейронами
-    def set_layers(self, neurons_amount: list):
+    def set_layers(self, neurons_amount: list, network_data=None):
         self.neurons_amount = neurons_amount                                        # Список кількості нейронів в кожному шарі
 
         # Проходження по кількості шарів нейромережі
         for i in range(len(self.neurons_amount)):
             self.layers.append(Layer(self.neurons_amount[i],                        # Додавання шару нейронів
                                      self.layers[i-1].neurons_amount if i > 0
-                                     else self.input_size))
+                                     else self.input_size, None if network_data is None else network_data[i]))
             if i > 0:                                                               # Прив'язка сусідніх шарів один до одного
                 self.layers[i].prev = self.layers[i-1]
                 self.layers[i-1].next = self.layers[i]
@@ -134,8 +135,8 @@ class Network:
     # Метод отримання значення середньої квадратичної помилки
     @staticmethod
     def loss(outputs: np.array, targets: np.array):
-        print(outputs)
-        print(targets)
+        # print(outputs)
+        # print(targets)
         return 1/len(outputs) * sum((targets[i] - outputs[i])**2
                                     for i in range(len(outputs)))
 
@@ -152,6 +153,7 @@ class Network:
 
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
+            print(f"EPOCH {epoch}")
 
             # Проходження по кожному наборі навчальних даних
             for k in range(len(sets)):
@@ -163,7 +165,7 @@ class Network:
                         neuron.global_output_grad = 0.0
 
                 self.input_signals(np.array(sets[k]))                             # Введення поточних вхідних значень в мережу
-                print(self.outputs)
+                # print(self.outputs)
                 average_loss += self.loss(self.outputs, targets[k])       # Сума помилок за кожен набір навчальних даних
                 loss_grads = self.loss_grad(self.outputs, targets[k])     # Значення градієнта помилки за кожен набір даних
 
@@ -270,26 +272,60 @@ class Network:
         accuracy = trues/amount * 100
         print(str(accuracy) + " %")
 
+    def get_model_from_file(self, filename):
+        with open(filename, "r", encoding="utf-8") as file:
+            self.model = json.load(file)
+            
+        self.input_size = self.model['input_size']
+        
+
+        self.set_layers(self.model['neurons_amount'], self.model['data'])
+
+    def write_model_to_file(self, filename):
+        self.model = dict()
+
+        self.model.update({'input_size': self.input_size})
+        self.model.update({'neurons_amount': self.neurons_amount})
+        self.model.update({'data': list()})
+
+        cur_lay = 0
+        for layer in self.layers:
+            self.model['data'].append(list())
+            for neuron in layer.neurons:
+                self.model['data'][cur_lay].append({'bias': neuron.bias, 'weights': list(neuron.weights)})
+            cur_lay+=1
+
+        with open(filename, "w", encoding="utf-8") as file:
+            json.dump(self.model, file, ensure_ascii=False, indent=2)
+
 if __name__ == "__main__":
 
-    sets, targets = create_dataset("Train_Test_Windows_10.csv")
+    # sets, targets = create_dataset("Train_Test_Windows_10.csv")
+
+    sets = np.array([[0,0], [0,1], [0,2],[0,3],[1,0],[1,1],[1,2],[1,3],[2,0],[2,1],[2,2],[2,3],[3,0],[3,1],[3,2],[3,3]])
+    targets = [[1], [1], [1], [1], [-1], [1], [-1], [1], [-1], [-1], [1], [1], [-1], [-1], [-1], [1]]
 
     in_amount = len(sets[0])
+    print(in_amount)
 
     network = Network(in_amount)
-    network.set_layers([100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 1])
+    # network.set_layers([16, 14, 12, 10, 8, 6, 4, 2, 1])
+    #
+    # network.learn_batch(sets, targets, 100, 0.01)
 
-    network.learn_online(sets, targets, 1000, 0.01)
+    network.get_model_from_file('model.json')
 
     network.check_network(sets, targets)
 
-    epochs = list(network.average_losses.keys())
-    losses = list(network.average_losses.values())
+    # network.write_model_to_file('model.json')
 
-    plt.plot(epochs, losses, marker='o', label='Average Loss')
-    plt.xlabel('Epoch')  # підпис осі X
-    plt.ylabel('Loss')  # підпис осі Y
-    plt.title('Зміна помилки під час навчання')  # заголовок
-    plt.grid(True)  # сітка
-    plt.legend()  # легенда
-    plt.show()  # показати графік
+    # epochs = list(network.average_losses.keys())
+    # losses = list(network.average_losses.values())
+
+    # plt.plot(epochs, losses, marker='o', label='Average Loss')
+    # plt.xlabel('Epoch')  # підпис осі X
+    # plt.ylabel('Loss')  # підпис осі Y
+    # plt.title('Зміна помилки під час навчання')  # заголовок
+    # plt.grid(True)  # сітка
+    # plt.legend()  # легенда
+    # plt.show()  # показати графік
