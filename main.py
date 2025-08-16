@@ -156,7 +156,7 @@ class Network:
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
             print(f"EPOCH {epoch}")
-
+            average_loss = 0.0
             # Проходження по кожному наборі навчальних даних
             for k in range(len(sets)):
 
@@ -179,9 +179,9 @@ class Network:
                 for layer in reversed(self.layers):
                     # Проходження по кожному нейрону шару
                     for neuron in layer.neurons:
-                        neuron.weights_global_grads = neuron.weights_grads * neuron.global_output_grad       # Обчислення глобальних градієнтів ваг
+                        neuron.global_weights_grads = neuron.weights_grads * neuron.global_output_grad       # Обчислення глобальних градієнтів ваг
                         neuron.global_bias_grad = neuron.bias_grad * neuron.global_output_grad              # Обчислення глобального градієнта біаса
-                        neuron.weights_grads_sum += neuron.weights_global_grads                              # Обчислення суми всіх глобальних градієнтів ваг
+                        neuron.weights_grads_sum += neuron.global_weights_grads                              # Обчислення суми всіх глобальних градієнтів ваг
                         neuron.bias_grads_sum += neuron.global_bias_grad                                    # Обчислення суми всіх глобальних градієнтів біаса
 
                         # Проходження по кожному попередньому нейрону
@@ -200,7 +200,7 @@ class Network:
                 for neuron in layer.neurons:
                     neuron.global_weights_grads = neuron.weights_grads_sum / len(sets)      # Визначення середнього значення ваг
                     neuron.weights_grads_sum = np.array([0.0 for _ in range(neuron.size)])    # Обнулення сум градієнтів ваг
-                    neuron.global_bias_grads = neuron.bias_grads_sum / len(sets)            # Визначення середнього значення біаса
+                    neuron.global_bias_grad = neuron.bias_grads_sum / len(sets)            # Визначення середнього значення біаса
                     neuron.bias_grads_sum = 0.0                                               # Обнулення суми градієнта біаса
                     neuron.learn(learning_rate)                                             # Виклик методу навчання нейрону
 
@@ -212,7 +212,7 @@ class Network:
 
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
-
+            average_loss = 0.0
             # Проходження по кожному наборі навчальних даних
             for k in range(len(sets)):
 
@@ -312,21 +312,22 @@ if __name__ == "__main__":
     network = Network(in_amount)
     # network.set_layers([16, 14, 12, 10, 8, 6, 4, 2, 1])
     #
-    # network.learn_batch(sets, targets, 100, 0.01)
-
     network.get_model_from_file('model.json')
+    network.learn_batch(sets, targets, 1000, 0.01)
+
+
 
     network.check_network(sets, targets)
 
-    # network.write_model_to_file('model.json')
+    network.write_model_to_file('model.json')
 
-    # epochs = list(network.average_losses.keys())
-    # losses = list(network.average_losses.values())
+    epochs = list(network.average_losses.keys())
+    losses = list(network.average_losses.values())
 
-    # plt.plot(epochs, losses, marker='o', label='Average Loss')
-    # plt.xlabel('Epoch')  # підпис осі X
-    # plt.ylabel('Loss')  # підпис осі Y
-    # plt.title('Зміна помилки під час навчання')  # заголовок
-    # plt.grid(True)  # сітка
-    # plt.legend()  # легенда
-    # plt.show()  # показати графік
+    plt.plot(epochs, losses, marker='o', label='Average Loss')
+    plt.xlabel('Epoch')  # підпис осі X
+    plt.ylabel('Loss')  # підпис осі Y
+    plt.title('Зміна помилки під час навчання')  # заголовок
+    plt.grid(True)  # сітка
+    plt.legend()  # легенда
+    plt.show()  # показати графік
