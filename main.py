@@ -51,7 +51,7 @@ class Neuron:
         return f"Neuron signal: {self.output}"
 
     # Метод оновлення ваг та біаса в процесі навчання
-    def learn(self, learning_rate: float, learning_type='batch'):
+    def learn(self, learning_rate: float):
 
         self.weights = self.weights - learning_rate * self.global_weights_grads     # Оновлення ваг
         self.bias = self.bias - learning_rate * self.global_bias_grad               # Оновлення біаса
@@ -60,6 +60,7 @@ class Neuron:
 # Клас шару нейронів
 class Layer:
     def __init__(self, neurons_amount: int, neurons_size: int, layer_data = None):
+        self.outputs = None
         self.neurons_amount = neurons_amount                    # Кількість нейронів в шарі
         self.neurons_size = neurons_size                        # Кількість вхідних сигналів нейронів
         self.neurons = list()                                   # Список нейронів шару
@@ -88,6 +89,7 @@ class Layer:
 # Клас нейронної мережі
 class Network:
     def __init__(self, input_size):
+        self.neurons_amount = None
         self.model = None
         self.input_size = input_size                            # Кількість вхідних сигналів нейромережі
         self.layers = list()                                    # Список шарів нейронів
@@ -157,7 +159,6 @@ class Network:
 
             # Проходження по кожному наборі навчальних даних
             for k in range(len(sets)):
-
 
                 # Обнулення глобальних градієнтів вихідних значень
                 for layer in self.layers:
