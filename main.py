@@ -28,7 +28,7 @@ class Neuron:
         self.bias_grads_sum = 0.0                     # Сума глобальних градієнтів біаса
 
     # Метод введення вхідних сигналів
-    def input_signals(self, signals: np.array):
+    def input_signals(self, signals: np.ndarray):
         self.inputs = signals                                       # Вхідні сигнали нейрону
         value = np.dot(self.inputs, self.weights) + self.bias       # Скалярний добуток ваг та сигналів плюс біас
         self.output = self.tanh(value)                              # Значення виходу нейрону після ктивації
@@ -149,26 +149,28 @@ class Network:
                  for i in range(len(outputs))]
 
     # Метод навчання нейромережі методом BATCH
-    def learn_batch(self, sets: np.array, targets: np.array, max_epoсh: int, learning_rate: float):
+    def learn_batch(self, train_sets: np.ndarray, train_targets: np.ndarray, val_sets: np.ndarray, val_targets: np.ndarray, max_epoсh: int, learning_rate: float):
         self.average_losses = dict()                  # Словник для зберігання середньої помилки за кожну епоху навчання
+        self.working_check = dict()
         average_loss = 0.0                         # Поточне значення середньої квадратичної помилки
 
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
-            print(f"EPOCH {epoch}")
+            print(f"EPOCH {epoch} - LOSS {average_loss}")
+            self.working_check.update({epoch: self.check_network(val_sets, val_targets)[1]})
             average_loss = 0.0
             # Проходження по кожному наборі навчальних даних
-            for k in range(len(sets)):
+            for k in range(len(train_sets)):
 
                 # Обнулення глобальних градієнтів вихідних значень
                 for layer in self.layers:
                     for neuron in layer.neurons:
                         neuron.global_output_grad = 0.0
 
-                self.input_signals(np.array(sets[k]))                             # Введення поточних вхідних значень в мережу
+                self.input_signals(np.array(train_sets[k]))                             # Введення поточних вхідних значень в мережу
                 # print(self.outputs)
-                average_loss += self.loss(self.outputs, targets[k])       # Сума помилок за кожен набір навчальних даних
-                loss_grads = self.loss_grad(self.outputs, targets[k])     # Значення градієнта помилки за кожен набір даних
+                average_loss += self.loss(self.outputs, train_targets[k])       # Сума помилок за кожен набір навчальних даних
+                loss_grads = self.loss_grad(self.outputs, train_targets[k])     # Значення градієнта помилки за кожен набір даних
 
                 # Проходження по кожному останньому нейрону мережі
                 for i in range(len(loss_grads)):
@@ -191,40 +193,42 @@ class Network:
                                                                   * neuron.prev[i].local_output_grad * neuron.global_output_grad)
 
 
-            average_loss /= len(sets)                                   # Обчислення середнього значення помилки
+            average_loss /= len(train_sets)                                   # Обчислення середнього значення помилки
             self.average_losses.update({epoch: average_loss})                # Додавання середнього значення помилки до списку
 
             # Навчання кожного шару
             for layer in self.layers:
                 # Навчання кожного нейрону
                 for neuron in layer.neurons:
-                    neuron.global_weights_grads = neuron.weights_grads_sum / len(sets)      # Визначення середнього значення ваг
+                    neuron.global_weights_grads = neuron.weights_grads_sum / len(train_sets)      # Визначення середнього значення ваг
                     neuron.weights_grads_sum = np.array([0.0 for _ in range(neuron.size)])    # Обнулення сум градієнтів ваг
-                    neuron.global_bias_grad = neuron.bias_grads_sum / len(sets)            # Визначення середнього значення біаса
+                    neuron.global_bias_grad = neuron.bias_grads_sum / len(train_sets)            # Визначення середнього значення біаса
                     neuron.bias_grads_sum = 0.0                                               # Обнулення суми градієнта біаса
                     neuron.learn(learning_rate)                                             # Виклик методу навчання нейрону
 
 
     # Метод навчання нейромережі методом ONLINE
-    def learn_online(self, sets: np.array, targets: np.array, max_epoсh: int, learning_rate: float):
+    def learn_online(self, train_sets: np.ndarray, train_targets: np.ndarray, val_sets: np.ndarray, val_targets: np.ndarray, max_epoсh: int, learning_rate: float):
         self.average_losses = dict()                  # Словник для зберігання середньої помилки за кожну епоху навчання
+        self.working_check = dict()
         average_loss = 0.0                            # Поточне значення середньої квадратичної помилки
 
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
+            self.working_check.update({epoch: self.check_network(val_sets, val_targets)})
             average_loss = 0.0
             # Проходження по кожному наборі навчальних даних
-            for k in range(len(sets)):
+            for k in range(len(train_sets)):
 
                 # Обнулення глобальних градієнтів вихідних значень
                 for layer in self.layers:
                     for neuron in layer.neurons:
                         neuron.global_output_grad = 0.0
 
-                self.input_signals(np.array(sets[k]))                             # Введення поточних вхідних значень в мережу
+                self.input_signals(np.array(train_sets[k]))                             # Введення поточних вхідних значень в мережу
 
-                average_loss += self.loss(self.outputs, targets[k])       # Сума помилок за кожен набір навчальних даних
-                loss_grads = self.loss_grad(self.outputs, targets[k])     # Значення градієнта помилки за кожен набір даних
+                average_loss += self.loss(self.outputs, train_targets[k])       # Сума помилок за кожен набір навчальних даних
+                loss_grads = self.loss_grad(self.outputs, train_targets[k])     # Значення градієнта помилки за кожен набір даних
 
                 # Проходження по кожному останньому нейрону мережі
                 for i in range(len(loss_grads)):
@@ -250,7 +254,7 @@ class Network:
                     for neuron in layer.neurons:
                         neuron.learn(learning_rate)  # Виклик методу навчання нейрону
 
-            average_loss /= len(sets)                                        # Обчислення середнього значення помилки
+            average_loss /= len(train_sets)                                        # Обчислення середнього значення помилки
             self.average_losses.update({epoch: average_loss})                # Додавання середнього значення помилки до списку
 
     def get_round_outputs(self, signals: np.array):
@@ -270,8 +274,10 @@ class Network:
 
         true_amount = f'{trues} / {amount}'
         print(true_amount)
-        accuracy = trues/amount * 100
-        print(str(accuracy) + " %")
+        accuracy = trues/amount
+        print(str(accuracy*100) + " %")
+
+        return true_amount, accuracy
 
     def get_model_from_file(self, filename):
         with open(filename, "r", encoding="utf-8") as file:
@@ -301,28 +307,28 @@ class Network:
 
 if __name__ == "__main__":
 
-    # sets, targets = create_dataset("Train_Test_Windows_10.csv")
+    train_sets, val_sets, train_targets, val_targets = create_dataset("Train_Test_Windows_10.csv")
 
-    sets = np.array([[0,0], [0,1], [0,2],[0,3],[1,0],[1,1],[1,2],[1,3],[2,0],[2,1],[2,2],[2,3],[3,0],[3,1],[3,2],[3,3]])
-    targets = [[1], [1], [1], [1], [-1], [1], [-1], [1], [-1], [-1], [1], [1], [-1], [-1], [-1], [1]]
+    # sets = np.array([[0,0], [0,1], [0,2],[0,3],[1,0],[1,1],[1,2],[1,3],[2,0],[2,1],[2,2],[2,3],[3,0],[3,1],[3,2],[3,3]])
+    # targets = [[1], [1], [1], [1], [-1], [1], [-1], [1], [-1], [-1], [1], [1], [-1], [-1], [-1], [1]]
 
-    in_amount = len(sets[0])
+    in_amount = len(train_sets[0])
     print(in_amount)
 
     network = Network(in_amount)
-    # network.set_layers([16, 14, 12, 10, 8, 6, 4, 2, 1])
+    network.set_layers([10, 4, 1])
     #
-    network.get_model_from_file('model.json')
-    network.learn_batch(sets, targets, 1000, 0.01)
+    # network.get_model_from_file('model.json')
+    network.learn_batch(train_sets, train_targets, val_sets, val_targets, 1000, 0.01)
 
 
 
-    network.check_network(sets, targets)
+    network.check_network(train_sets, train_targets)
 
-    network.write_model_to_file('model.json')
+    # network.write_model_to_file('model.json')
 
-    epochs = list(network.average_losses.keys())
-    losses = list(network.average_losses.values())
+    epochs = list(network.working_check.keys())
+    losses = list(network.working_check.values())
 
     plt.plot(epochs, losses, marker='o', label='Average Loss')
     plt.xlabel('Epoch')  # підпис осі X
