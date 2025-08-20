@@ -153,10 +153,12 @@ class Network:
         self.average_losses = dict()                  # Словник для зберігання середньої помилки за кожну епоху навчання
         self.working_check = dict()
         average_loss = 0.0                         # Поточне значення середньої квадратичної помилки
+        average_loss_val = 0.0
+        self.average_losses_val = dict()
 
         # Навчання в рамках максимальної кількості епох
         for epoch in range(max_epoсh):
-            print(f"EPOCH {epoch} - LOSS {average_loss}")
+            print(f"EPOCH {epoch} - LOSS {average_loss_val}")
             self.working_check.update({epoch: self.check_network(val_sets, val_targets)[1]})
             average_loss = 0.0
             # Проходження по кожному наборі навчальних даних
@@ -195,6 +197,8 @@ class Network:
 
             average_loss /= len(train_sets)                                   # Обчислення середнього значення помилки
             self.average_losses.update({epoch: average_loss})                # Додавання середнього значення помилки до списку
+            average_loss_val = self.check_network(val_sets, val_targets)[2]
+            self.average_losses_val.update({epoch: average_loss_val})
 
             # Навчання кожного шару
             for layer in self.layers:
@@ -265,19 +269,28 @@ class Network:
 
         return round_outputs
 
+
+
     def check_network(self, sets, targets):
         amount = len(sets)
+        outputs = list()
+        loss = 0.0
         trues = 0
         for i in range(amount):
             if self.get_round_outputs(sets[i]) == targets[i]:
                 trues+=1
+            outputs.append(self.input_signals(sets[i]))
+
+        for i in range(amount):
+            loss += self.loss(outputs[i], targets[i])
 
         true_amount = f'{trues} / {amount}'
         print(true_amount)
         accuracy = trues/amount
         print(str(accuracy*100) + " %")
+        loss = loss / amount
 
-        return true_amount, accuracy
+        return true_amount, accuracy, loss
 
     def get_model_from_file(self, filename):
         with open(filename, "r", encoding="utf-8") as file:
@@ -319,7 +332,7 @@ if __name__ == "__main__":
     network.set_layers([10, 4, 1])
     #
     # network.get_model_from_file('model.json')
-    network.learn_batch(train_sets, train_targets, val_sets, val_targets, 1000, 0.01)
+    network.learn_batch(train_sets, train_targets, val_sets, val_targets, 100, 0.01)
 
 
 
@@ -327,8 +340,8 @@ if __name__ == "__main__":
 
     # network.write_model_to_file('model.json')
 
-    epochs = list(network.working_check.keys())
-    losses = list(network.working_check.values())
+    epochs = list(network.average_losses_val.keys())
+    losses = list(network.average_losses_val.values())
 
     plt.plot(epochs, losses, marker='o', label='Average Loss')
     plt.xlabel('Epoch')  # підпис осі X
