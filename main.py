@@ -1,352 +1,296 @@
+# mlp_sgd_vector.py
+# -*- coding: utf-8 -*-
+"""
+Найпростіший векторизований MLP на NumPy:
+- приховані шари з tanh
+- вихідний шар за замовчуванням теж tanh (зручно під мітки {-1, 1})
+- лосс: MSE
+- оптимізатор: звичайний SGD (фіксований learning_rate), без Adam
+- ініціалізація ваг: рівномірно в [-1, 1], bias = 0
+- оцінка 'epoch 0' (до навчання)
+- збереження/завантаження у JSON
+
+Потрібен data_utils.create_dataset(...) -> (X_train, X_val, y_train, y_val),
+де y зазвичай у {-1, 1}.
+"""
+
+import json
 import numpy as np
-import math
 import matplotlib.pyplot as plt
 from data_utils import create_dataset
-import json
+
+# ===================== 1) Конфіг моделі =====================
+
+MODEL = {
+    "hidden_layers": [10,6],   # змінюй під себе (можна [] для логістичної регресії з tanh)
+    "hidden_activation": "tanh",      # залишимо 'tanh' для простоти
+    "output_dim": 1,
+    "output_activation": "tanh",      # 'tanh' під мітки {-1,1}; (під {0,1} можеш поставити 'sigmoid')
+    "seed": 123
+}
+
+# ===================== 2) Архітектура / ініціалізація =====================
+
+"""
+Побудова архітектури нейромережі: список розмірів шарів і відповідних активацій
+input_size - кількість ознак
+model - конфігурація нейромережі
+"""
+def build_arch(input_size, model):
+    hidden = model["hidden_layers"]
+    sizes = [int(input_size)] + list(map(int, hidden)) + [int(model["output_dim"])]
+    activations = [model["hidden_activation"]] * len(hidden) + [model["output_activation"]]
+    assert len(activations) == len(sizes) - 1
+    return sizes, activations
+"""
+size - список кількості нейронів в шарах
+activations - список функцій активації, які застосовуються до кожного шару
+"""
 
 
-# Клас нейрону
-class Neuron:
-    def __init__(self, input_size, neuron_data = None):
-        self.size = input_size                      # Кількість вхідних сигналів нейрону
-        self.layer = None                           # Шар, до якого належить екземпляр нейрону
-        self.inputs = None                          # Вхідні сигнали нейрону
-        self.inputs_grad = None                     # Локальні градієнти вхідних сигналів
-        self.inputs_global_grads = None             # Глобальні градієнти вхідних сигналів
-        self.output = None                          # Вихідний сигнал нейрону
-        self.weights = np.random.uniform(-1, 1, self.size) if neuron_data is None else neuron_data['weights']
-        self.weights_grads = None                   # Локальні градієнти ваг нейрону
-        self.global_weights_grads = None            # Глобальні градієнти ваг
-        self.bias = 0 if neuron_data is None else neuron_data['bias']  # Біас нейрону
-        self.bias_grad = 1                          # Локальний градієнт біаса
-        self.global_bias_grad = None                # Глобальний градієнт біаса
-        self.global_output_grad = 0.0                 # Глобальний градієнт вихідного сигналу
-        self.local_output_grad = None               # Локальний градієнт вихідного сигналу
-        self.next = list()                          # Список наступних нейронів за зв'язками
-        self.prev = list()                          # Список попередніх нейронів за зв'язками
-        self.weights_grads_sum = np.array([0.0 for _ in range(self.size)])               # Суми глобальних градієнтів ваг
-        self.bias_grads_sum = 0.0                     # Сума глобальних градієнтів біаса
-
-    # Метод введення вхідних сигналів
-    def input_signals(self, signals: np.ndarray):
-        self.inputs = signals                                       # Вхідні сигнали нейрону
-        value = np.dot(self.inputs, self.weights) + self.bias       # Скалярний добуток ваг та сигналів плюс біас
-        self.output = self.tanh(value)                              # Значення виходу нейрону після ктивації
-        self.local_output_grad = self.tanh_grad(value)              # Локальний градієнт виходу нейрону
-        self.weights_grads = np.array(self.inputs)                            # Локальні градієнти ваг нейрону
-        self.inputs_grad = self.weights                             # Локальні градієнти вхідних сигналів
-
-    # Метод активації за функцією tanh
-    @staticmethod
-    def tanh(signal):
-        return ((math.exp(signal) - math.exp(-signal))
-                / (math.exp(signal) + math.exp(-signal)))
-
-    # Метод обчислення градієнта
-    def tanh_grad(self, signal):
-        return 1 - self.tanh(signal) ** 2
-
-    # Повернення рядкового значення нейрону
-    def __str__(self):
-        return f"Neuron signal: {self.output}"
-
-    # Метод оновлення ваг та біаса в процесі навчання
-    def learn(self, learning_rate: float):
-
-        self.weights = self.weights - learning_rate * self.global_weights_grads     # Оновлення ваг
-        self.bias = self.bias - learning_rate * self.global_bias_grad               # Оновлення біаса
+"""
+Ініціалізація ваг
+size - список кількості нейронів в шарах
+зерно ГВЧ для відтворюваності ініціалізації
+"""
+def init_uniform11(sizes, seed=42):
+    """Ваги рівномірно в [-1, 1], bias = 0 — максимально просто."""
+    rng = np.random.default_rng(seed)
+    params = {}
+    for l in range(1, len(sizes)):
+        fan_in, fan_out = sizes[l-1], sizes[l]
+        params[f"W{l}"] = rng.uniform(-1.0, 1.0, size=(fan_out, fan_in)).astype(np.float32)
+        params[f"b{l}"] = np.zeros(fan_out, dtype=np.float32)
+    return params
+"""
+params - параметри моделі
+"""
 
 
-# Клас шару нейронів
-class Layer:
-    def __init__(self, neurons_amount: int, neurons_size: int, layer_data = None):
-        self.outputs = None
-        self.neurons_amount = neurons_amount                    # Кількість нейронів в шарі
-        self.neurons_size = neurons_size                        # Кількість вхідних сигналів нейронів
-        self.neurons = list()                                   # Список нейронів шару
-        self.prev = None                                        # Посилання на попередній шар
-        self.next = None                                        # Посилання на наступний шар
-
-        # Заповнення шару нейронами
-        for i in range(self.neurons_amount):
-            neuron = Neuron(self.neurons_size, None if layer_data is None else layer_data[i])                 # Створення екземпляру нейрону
-            neuron.layer = self                                 # Позначення поточного шару як шару нейрона
-            self.neurons.append(neuron)                         # Додавання нейрону до списку нейронів шару
-
-    # Метод введення вхідних сигналів
-    def input_signals(self, signals):
-        outputs = list()                                        # Список вихідних сигналів шару
-        for neuron in self.neurons:
-            neuron.input_signals(signals)                       # Введення сигнілів кожному нейрону в шарі
-            outputs.append(neuron.output)                       # Додавання вихідного сигналу нейрону до списку
-
-        self.outputs = outputs                                  # Кінцевий список вихідних сигналів шару
-
-    # Повернення рядкового значення нейрону
-    def __str__(self):
-        return f"Layer: \n {[str(neuron) for neuron in self.neurons]}"
-
-# Клас нейронної мережі
-class Network:
-    def __init__(self, input_size):
-        self.neurons_amount = None
-        self.model = None
-        self.input_size = input_size                            # Кількість вхідних сигналів нейромережі
-        self.layers = list()                                    # Список шарів нейронів
-        self.inputs = None                                      # Список вхідних сигналів
-        self.outputs = None                                     # Список вихідних сигналів
-        self.average_losses = None
-
-    # Метод заповнення нейромережі шарами та нейронами
-    def set_layers(self, neurons_amount: list, network_data=None):
-        self.neurons_amount = neurons_amount                                        # Список кількості нейронів в кожному шарі
-
-        # Проходження по кількості шарів нейромережі
-        for i in range(len(self.neurons_amount)):
-            self.layers.append(Layer(self.neurons_amount[i],                        # Додавання шару нейронів
-                                     self.layers[i-1].neurons_amount if i > 0
-                                     else self.input_size, None if network_data is None else network_data[i]))
-            if i > 0:                                                               # Прив'язка сусідніх шарів один до одного
-                self.layers[i].prev = self.layers[i-1]
-                self.layers[i-1].next = self.layers[i]
-
-                for first in self.layers[i-1].neurons:                              # Прив'язка сусідніх нейронів один до одного
-                    for second in self.layers[i].neurons:
-                        first.next.append(second)
-                        second.prev.append(first)
-
-    # Рекурсивний метод введення вхідних сигналів
-    def input_signals(self, signals: np.array, cur_layer=None):
-        if cur_layer is None:                                                       # Якщо починаємо з першого шару
-            cur_layer = self.layers[0]
-
-        cur_layer.input_signals(signals)                                            # Введення сигналів в поточний шар
-
-        # Якщо існує наступний шар
-        if cur_layer.next:
-            self.input_signals(cur_layer.outputs, cur_layer.next)                   # Рекурсивно вводимо виходи поточного шару у входи наступного
-        else:
-            self.outputs = cur_layer.outputs                                        # Виходи останнього шару вважаємо виходами мережі
-
-        return self.outputs
-
-    # Повернення рядкового виразу нейромережі
-    def __str__(self):
-        return f"Network: {[str(layer) for layer in self.layers]}"
-
-    # Метод отримання значення середньої квадратичної помилки
-    @staticmethod
-    def loss(outputs: np.array, targets: np.array):
-        # print(outputs)
-        # print(targets)
-        return 1/len(outputs) * sum((targets[i] - outputs[i])**2
-                                    for i in range(len(outputs)))
-
-    # Метод отримання градієнта квадратичної помилки
-    @staticmethod
-    def loss_grad(outputs: np.array, targets: np.array):
-        return [2* (outputs[i] - targets[i]) / len(outputs)
-                 for i in range(len(outputs))]
-
-    # Метод навчання нейромережі методом BATCH
-    def learn_batch(self, train_sets: np.ndarray, train_targets: np.ndarray, val_sets: np.ndarray, val_targets: np.ndarray, max_epoсh: int, learning_rate: float):
-        self.average_losses = dict()                  # Словник для зберігання середньої помилки за кожну епоху навчання
-        self.working_check = dict()
-        average_loss = 0.0                         # Поточне значення середньої квадратичної помилки
-        average_loss_val = 0.0
-        self.average_losses_val = dict()
-
-        # Навчання в рамках максимальної кількості епох
-        for epoch in range(max_epoсh):
-            print(f"EPOCH {epoch} - LOSS {average_loss_val}")
-            self.working_check.update({epoch: self.check_network(val_sets, val_targets)[1]})
-            average_loss = 0.0
-            # Проходження по кожному наборі навчальних даних
-            for k in range(len(train_sets)):
-
-                # Обнулення глобальних градієнтів вихідних значень
-                for layer in self.layers:
-                    for neuron in layer.neurons:
-                        neuron.global_output_grad = 0.0
-
-                self.input_signals(np.array(train_sets[k]))                             # Введення поточних вхідних значень в мережу
-                # print(self.outputs)
-                average_loss += self.loss(self.outputs, train_targets[k])       # Сума помилок за кожен набір навчальних даних
-                loss_grads = self.loss_grad(self.outputs, train_targets[k])     # Значення градієнта помилки за кожен набір даних
-
-                # Проходження по кожному останньому нейрону мережі
-                for i in range(len(loss_grads)):
-                    # Встановлення глобального градієнта кожного останнього нейрону
-                    self.layers[-1].neurons[i].global_output_grad = self.layers[-1].neurons[i].local_output_grad * loss_grads[i]
-
-                # Зворотнє проходження по всім шарам нейромережі
-                for layer in reversed(self.layers):
-                    # Проходження по кожному нейрону шару
-                    for neuron in layer.neurons:
-                        neuron.global_weights_grads = neuron.weights_grads * neuron.global_output_grad       # Обчислення глобальних градієнтів ваг
-                        neuron.global_bias_grad = neuron.bias_grad * neuron.global_output_grad              # Обчислення глобального градієнта біаса
-                        neuron.weights_grads_sum += neuron.global_weights_grads                              # Обчислення суми всіх глобальних градієнтів ваг
-                        neuron.bias_grads_sum += neuron.global_bias_grad                                    # Обчислення суми всіх глобальних градієнтів біаса
-
-                        # Проходження по кожному попередньому нейрону
-                        for i in range(len(neuron.prev)):
-                            # Обчислення глобального градієнта вихідного значення кожного нейрона
-                            neuron.prev[i].global_output_grad += (neuron.weights[i]
-                                                                  * neuron.prev[i].local_output_grad * neuron.global_output_grad)
+# ===================== 3) Активації =====================
+"""
+values - тензор значень для активації
+name - функція активації
+"""
+def act(values, name):
+    name = name.lower()
+    if name == "tanh":    return np.tanh(values)
+    if name == "sigmoid": return 1.0 / (1.0 + np.exp(-values))
+    if name == "linear":  return values
+    raise ValueError(name)
 
 
-            average_loss /= len(train_sets)                                   # Обчислення середнього значення помилки
-            self.average_losses.update({epoch: average_loss})                # Додавання середнього значення помилки до списку
-            average_loss_val = self.check_network(val_sets, val_targets)[2]
-            self.average_losses_val.update({epoch: average_loss_val})
+"""
+outputs - вихід активації
+name - функція активації
+"""
+def act_deriv(outputs, name):
+    """Похідна через ВИХІД a=act(z) — прості формули."""
+    name = name.lower()
+    if name == "tanh":    return 1.0 - outputs*outputs
+    if name == "sigmoid": return outputs*(1.0 - outputs)
+    if name == "linear":  return np.ones_like(outputs, dtype=outputs.dtype)
+    raise ValueError(name)
 
-            # Навчання кожного шару
-            for layer in self.layers:
-                # Навчання кожного нейрону
-                for neuron in layer.neurons:
-                    neuron.global_weights_grads = neuron.weights_grads_sum / len(train_sets)      # Визначення середнього значення ваг
-                    neuron.weights_grads_sum = np.array([0.0 for _ in range(neuron.size)])    # Обнулення сум градієнтів ваг
-                    neuron.global_bias_grad = neuron.bias_grads_sum / len(train_sets)            # Визначення середнього значення біаса
-                    neuron.bias_grads_sum = 0.0                                               # Обнулення суми градієнта біаса
-                    neuron.learn(learning_rate)                                             # Виклик методу навчання нейрону
+# ===================== 4) Прямий / зворотний проходи =====================
+"""
+inputs - батч вхідних ознак
+params - ваги й зсуви всіх шарів
+activations - функції активації
+"""
+def forward(inputs, params, activations):
+    """A[0]=X, A[-1]=вихід; все вектори/матриці."""
+    outputs = [inputs.astype(np.float32)]
+    before_act = []
+    L = len(activations)
+    for l in range(1, L+1):
+        W, b = params[f"W{l}"], params[f"b{l}"]
+        before_act_l = outputs[-1] @ W.T + b          # (N, in) @ (out, in)^T + (out,) -> (N, out)
+        Al = act(before_act_l, activations[l-1])
+        before_act.append(before_act_l); outputs.append(Al)
+    return outputs, before_act
+"""
+outputs - список виходів кожного шару
+before_act - список значень до активацій
+"""
 
+"""
+output - передбачення моделі
+target - цільове значення
+"""
+def mse_loss(output, target):
+    diff = (output - target)
+    return float(np.mean(diff*diff))
 
-    # Метод навчання нейромережі методом ONLINE
-    def learn_online(self, train_sets: np.ndarray, train_targets: np.ndarray, val_sets: np.ndarray, val_targets: np.ndarray, max_epoсh: int, learning_rate: float):
-        self.average_losses = dict()                  # Словник для зберігання середньої помилки за кожну епоху навчання
-        self.working_check = dict()
-        average_loss = 0.0                            # Поточне значення середньої квадратичної помилки
+"""
+outputs - список активацій з прямого проходу
+targets - правильні значення для поточного батча
+params - словник параметрів моделі - ваги та зсуви
+activations - список функцій активації
+l2=0.0 - коефіцієнт L2-регуляризації притягує ваги до нуля (зменшує перенавчання)
+"""
+def backward_mse(A, Y, params, activations, l2=0.0):
+    """
+    Проста MSE: dL/dA_L = 2/N * (A_L - Y)
+    Далі стандартний backprop, похідні через act_deriv(A, name).
+    """
+    grads = {}
+    N = max(1, Y.shape[0])
+    L = len(activations)
+    A_L = A[-1]
+    # градієнт по виходу
+    delta = (2.0 / N) * (A_L - Y) * act_deriv(A_L, activations[-1])
 
-        # Навчання в рамках максимальної кількості епох
-        for epoch in range(max_epoсh):
-            self.working_check.update({epoch: self.check_network(val_sets, val_targets)})
-            average_loss = 0.0
-            # Проходження по кожному наборі навчальних даних
-            for k in range(len(train_sets)):
-
-                # Обнулення глобальних градієнтів вихідних значень
-                for layer in self.layers:
-                    for neuron in layer.neurons:
-                        neuron.global_output_grad = 0.0
-
-                self.input_signals(np.array(train_sets[k]))                             # Введення поточних вхідних значень в мережу
-
-                average_loss += self.loss(self.outputs, train_targets[k])       # Сума помилок за кожен набір навчальних даних
-                loss_grads = self.loss_grad(self.outputs, train_targets[k])     # Значення градієнта помилки за кожен набір даних
-
-                # Проходження по кожному останньому нейрону мережі
-                for i in range(len(loss_grads)):
-                    # Встановлення глобального градієнта кожного останнього нейрону
-                    self.layers[-1].neurons[i].global_output_grad = self.layers[-1].neurons[i].local_output_grad * loss_grads[i]
-
-                # Зворотнє проходження по всім шарам нейромережі
-                for layer in reversed(self.layers):
-                    # Проходження по кожному нейрону шару
-                    for neuron in layer.neurons:
-                        neuron.global_weights_grads = neuron.weights_grads * neuron.global_output_grad       # Обчислення глобальних градієнтів ваг
-                        neuron.global_bias_grad = neuron.bias_grad * neuron.global_output_grad              # Обчислення глобального градієнта біаса
-
-                        # Проходження по кожному попередньому нейрону
-                        for i in range(len(neuron.prev)):
-                            # Обчислення глобального градієнта вихідного значення кожного нейрона
-                            neuron.prev[i].global_output_grad += (neuron.weights[i]
-                                                                  * neuron.prev[i].local_output_grad * neuron.global_output_grad)
-
-                # Навчання кожного шару
-                for layer in self.layers:
-                    # Навчання кожного нейрону
-                    for neuron in layer.neurons:
-                        neuron.learn(learning_rate)  # Виклик методу навчання нейрону
-
-            average_loss /= len(train_sets)                                        # Обчислення середнього значення помилки
-            self.average_losses.update({epoch: average_loss})                # Додавання середнього значення помилки до списку
-
-    def get_round_outputs(self, signals: np.array):
-        outputs = self.input_signals(signals)
-        round_outputs = list()
-        for output in outputs:
-            round_outputs.append(1 if output >= 0 else -1)
-
-        return round_outputs
+    for l in range(L, 0, -1):
+        Wl = params[f"W{l}"]
+        grads[f"W{l}"] = delta.T @ A[l-1] + l2 * Wl      # (out,N)@(N,in) -> (out,in)
+        grads[f"b{l}"] = delta.sum(axis=0)               # (out,)
+        if l > 1:
+            delta = (delta @ Wl) * act_deriv(A[l-1], activations[l-2])
+    return grads
+"""
+grads - словник градієнтів тієї ж структури що і params
+"""
 
 
+# ===================== 5) Звичайний SGD-крок =====================
 
-    def check_network(self, sets, targets):
-        amount = len(sets)
-        outputs = list()
-        loss = 0.0
-        trues = 0
-        for i in range(amount):
-            if self.get_round_outputs(sets[i]) == targets[i]:
-                trues+=1
-            outputs.append(self.input_signals(sets[i]))
+def sgd_step(params, grads, lr=1e-3):
+    for k in params:
+        params[k] -= lr * grads[k]
 
-        for i in range(amount):
-            loss += self.loss(outputs[i], targets[i])
+# ===================== 6) Сервіси: батчі / метрики / I/O =====================
 
-        true_amount = f'{trues} / {amount}'
-        print(true_amount)
-        accuracy = trues/amount
-        print(str(accuracy*100) + " %")
-        loss = loss / amount
+def batch_iter(X, Y, batch_size=64, shuffle=True, seed=0):
+    N = X.shape[0]
+    idx = np.arange(N)
+    if shuffle:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(idx)
+    for i in range(0, N, batch_size):
+        sel = idx[i:i+batch_size]
+        yield X[sel], Y[sel]
 
-        return true_amount, accuracy, loss
+def accuracy_tanh(outputs_pm1, y_pm1, thr=0.0):
+    """Точність за знаком для {-1,1}: threshold 0."""
+    pred = (outputs_pm1 >= thr).astype(np.float32)*2 - 1
+    y    = y_pm1.astype(np.float32)
+    return float(np.mean(pred == y))
 
-    def get_model_from_file(self, filename):
-        with open(filename, "r", encoding="utf-8") as file:
-            self.model = json.load(file)
-            
-        self.input_size = self.model['input_size']
-        
+def save_model_json(path, sizes, activations, params):
+    payload = {"sizes": sizes, "activations": activations,
+               "params": {k: v.tolist() for k, v in params.items()}}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
-        self.set_layers(self.model['neurons_amount'], self.model['data'])
+def load_model_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    params = {k: np.array(v, dtype=np.float32) for k, v in payload["params"].items()}
+    return payload["sizes"], payload["activations"], params
 
-    def write_model_to_file(self, filename):
-        self.model = dict()
+# ===================== 7) Тренування (SGD, фіксований LR, оцінка epoch 0) =====================
 
-        self.model.update({'input_size': self.input_size})
-        self.model.update({'neurons_amount': self.neurons_amount})
-        self.model.update({'data': list()})
+def train_mlp_sgd(
+    Xtr, Ytr_pm1, Xval, Yval_pm1,
+    model_cfg,
+    max_epochs=200, batch_size=64,
+    lr=1e-4,                    # невеликий, щоб рух був поступовим
+    l2=0.0,                     # регуляризація L2 (0 = вимкнено)
+    model_out="model_simple.json"
+):
+    sizes, activations = build_arch(Xtr.shape[1], model_cfg)
 
-        cur_lay = 0
-        for layer in self.layers:
-            self.model['data'].append(list())
-            for neuron in layer.neurons:
-                self.model['data'][cur_lay].append({'bias': neuron.bias, 'weights': list(neuron.weights)})
-            cur_lay+=1
+    # y вже в {-1,1}; залишаємо як є (з tanh добре працює MSE)
+    Ytr = Ytr_pm1.astype(np.float32)
+    Yval = Yval_pm1.astype(np.float32)
+    Xtr = Xtr.astype(np.float32)
+    Xval = Xval.astype(np.float32)
 
-        with open(filename, "w", encoding="utf-8") as file:
-            json.dump(self.model, file, ensure_ascii=False, indent=2)
+    params = init_uniform11(sizes, seed=model_cfg.get("seed", 42))
+
+    print("\n[ARCH: simplest SGD]")
+    print(" sizes:", sizes)
+    print(" activations:", activations)
+    print(" optimizer: SGD (fixed lr)")
+    print(" lr:", lr)
+
+    history = {"epoch": [], "train_mse": [], "val_mse": [], "val_acc": []}
+
+    # ---- Оцінка ДО старту (epoch 0) ----
+    Atr0, _ = forward(Xtr, params, activations)
+    Av0,  _ = forward(Xval, params, activations)
+    train0 = mse_loss(Atr0[-1], Ytr)
+    val0   = mse_loss(Av0[-1], Yval)
+    acc0   = accuracy_tanh(Av0[-1], Yval)
+    print(f"epoch   0 | train_mse {train0:.5f} | val_mse {val0:.5f} | val_acc {acc0*100:6.2f}%")
+
+    history["epoch"].append(0)
+    history["train_mse"].append(train0)
+    history["val_mse"].append(val0)
+    history["val_acc"].append(acc0)
+
+    # ---- Навчання ----
+    for epoch in range(1, max_epochs+1):
+        for Xb, Yb in batch_iter(Xtr, Ytr, batch_size=batch_size, shuffle=True,
+                                 seed=model_cfg.get("seed", 0) + epoch):
+            A, Z = forward(Xb, params, activations)
+            grads = backward_mse(A, Yb, params, activations, l2=l2)
+            sgd_step(params, grads, lr=lr)
+
+        Atr, _ = forward(Xtr, params, activations)
+        Av,  _ = forward(Xval, params, activations)
+        train_mse = mse_loss(Atr[-1], Ytr)
+        val_mse   = mse_loss(Av[-1], Yval)
+        val_acc   = accuracy_tanh(Av[-1], Yval)
+        print(f"epoch {epoch:3d} | train_mse {train_mse:.5f} | val_mse {val_mse:.5f} | val_acc {val_acc*100:6.2f}%")
+
+        history["epoch"].append(epoch)
+        history["train_mse"].append(train_mse)
+        history["val_mse"].append(val_mse)
+        history["val_acc"].append(val_acc)
+
+    save_model_json(model_out, sizes, activations, params)
+    return params, history, (sizes, activations)
+
+# ===================== 8) Інференс =====================
+
+def predict(X, sizes, activations, params, mode="sign"):
+    """Повертає або непороговані значення, або -1/1 за знаком."""
+    A, _ = forward(X.astype(np.float32), params, activations)
+    out = A[-1]
+    if mode == "sign":
+        return (out >= 0).astype(np.float32)*2 - 1
+    return out
+
+# ===================== 9) Запуск прикладу =====================
 
 if __name__ == "__main__":
+    # читаємо дані
+    Xtr, Xval, Ytr, Yval = create_dataset("Train_Test_Windows_10.csv")
+    Ytr = np.asarray(Ytr, dtype=np.float32).reshape(-1, 1)
+    Yval = np.asarray(Yval, dtype=np.float32).reshape(-1, 1)
 
-    train_sets, val_sets, train_targets, val_targets = create_dataset("Train_Test_Windows_10.csv")
+    # тренування (SGD, фіксований lr)
+    params, history, arch = train_mlp_sgd(
+        Xtr, Ytr, Xval, Yval,
+        MODEL,
+        max_epochs=1000, batch_size=100,
+        lr=1e-5,           # якщо падає занадто швидко — ще менше (1e-5)
+        l2=0.0,
+        model_out="model_simple.json"
+    )
 
-    # sets = np.array([[0,0], [0,1], [0,2],[0,3],[1,0],[1,1],[1,2],[1,3],[2,0],[2,1],[2,2],[2,3],[3,0],[3,1],[3,2],[3,3]])
-    # targets = [[1], [1], [1], [1], [-1], [1], [-1], [1], [-1], [-1], [1], [1], [-1], [-1], [-1], [1]]
+    sizes, activations = arch
 
-    in_amount = len(train_sets[0])
-    print(in_amount)
+    # графік MSE
+    plt.plot(history["epoch"], history["val_mse"], label="val_mse", marker="o")
+    plt.plot(history["epoch"], history["train_mse"], label="train_mse", alpha=0.7)
+    plt.xlabel("Epoch"); plt.ylabel("MSE"); plt.grid(True); plt.legend()
+    plt.title("Навчання MLP (SGD + MSE, tanh)")
+    plt.show()
 
-    network = Network(in_amount)
-    network.set_layers([10, 4, 1])
-    #
-    # network.get_model_from_file('model.json')
-    network.learn_batch(train_sets, train_targets, val_sets, val_targets, 100, 0.01)
-
-
-
-    network.check_network(train_sets, train_targets)
-
-    # network.write_model_to_file('model.json')
-
-    epochs = list(network.average_losses_val.keys())
-    losses = list(network.average_losses_val.values())
-
-    plt.plot(epochs, losses, marker='o', label='Average Loss')
-    plt.xlabel('Epoch')  # підпис осі X
-    plt.ylabel('Loss')  # підпис осі Y
-    plt.title('Зміна помилки під час навчання')  # заголовок
-    plt.grid(True)  # сітка
-    plt.legend()  # легенда
-    plt.show()  # показати графік
+    # фінальна точність за знаком
+    y_pred = predict(Xval, sizes, activations, params, mode="sign")
+    final_acc = float(np.mean(y_pred == Yval))
+    print(f"Final val_acc (sign): {final_acc*100:.2f}%")
