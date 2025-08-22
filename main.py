@@ -22,7 +22,7 @@ from data_utils import create_dataset
 # ===================== 1) Конфіг моделі =====================
 
 MODEL = {
-    "hidden_layers": [10,6],   # змінюй під себе (можна [] для логістичної регресії з tanh)
+    "hidden_layers": [],   # змінюй під себе (можна [] для логістичної регресії з tanh)
     "hidden_activation": "tanh",      # залишимо 'tanh' для простоти
     "output_dim": 1,
     "output_activation": "tanh",      # 'tanh' під мітки {-1,1}; (під {0,1} можеш поставити 'sigmoid')
@@ -154,28 +154,41 @@ grads - словник градієнтів тієї ж структури що 
 
 
 # ===================== 5) Звичайний SGD-крок =====================
-
-def sgd_step(params, grads, lr=1e-3):
+"""
+оновлення ваг та біасів за формулою
+"""
+def sgd_step(params, grads, learning_rate=1e-3):
     for k in params:
-        params[k] -= lr * grads[k]
+        params[k] -= learning_rate * grads[k]
 
 # ===================== 6) Сервіси: батчі / метрики / I/O =====================
-
-def batch_iter(X, Y, batch_size=64, shuffle=True, seed=0):
-    N = X.shape[0]
+"""
+Розбиття датасету на навчальні батчі
+"""
+def batch_iter(inputs, targets, batch_size=64, shuffle=True, seed=0):
+    N = inputs.shape[0]
     idx = np.arange(N)
     if shuffle:
         rng = np.random.default_rng(seed)
         rng.shuffle(idx)
     for i in range(0, N, batch_size):
         sel = idx[i:i+batch_size]
-        yield X[sel], Y[sel]
+        yield inputs[sel], targets[sel]
 
-def accuracy_tanh(outputs_pm1, y_pm1, thr=0.0):
+"""
+Обчислення точності класифікації
+outputs_pm1 - вихід моделі для батча прикладів
+y_pm1 - правильні мітки для того ж батча
+thr=0.0 - поріг для бінарізації
+"""
+def accuracy_tanh(outputs, targets, thr=0.0):
     """Точність за знаком для {-1,1}: threshold 0."""
-    pred = (outputs_pm1 >= thr).astype(np.float32)*2 - 1
-    y    = y_pm1.astype(np.float32)
+    # Перетворення масиву значень в булевий масив, а потім в числа -1 або 1
+    pred = (outputs >= thr).astype(np.float32)*2 - 1
+    # приведення правильних міток в тип float
+    y    = targets.astype(np.float32)
     return float(np.mean(pred == y))
+
 
 def save_model_json(path, sizes, activations, params):
     payload = {"sizes": sizes, "activations": activations,
@@ -190,7 +203,23 @@ def load_model_json(path):
     return payload["sizes"], payload["activations"], params
 
 # ===================== 7) Тренування (SGD, фіксований LR, оцінка epoch 0) =====================
-
+"""
+Xtr: np.ndarray форми (N_tr, d) — тренувальні ознаки (float32 після касту).
+Ytr_pm1: np.ndarray форми (N_tr, 1) — тренувальні мітки у {-1, 1}.
+Xval: np.ndarray форми (N_val, d) — валідаційні ознаки.
+Yval_pm1: np.ndarray форми (N_val, 1) — валідаційні мітки у {-1, 1}.
+model_cfg: dict із полями типу:
+"hidden_layers": список розмірів прихованих шарів, напр. [10,6] або [] для лише вихідного.
+"hidden_activation": напр. "tanh".
+"output_dim": розмір виходу (для бінарки — 1).
+"output_activation": напр. "tanh".
+"seed": int для відтворюваної ініціалізації.
+max_epochs: int — кількість епох навчання.
+batch_size: int — розмір мінібатча в batch_iter.
+lr: float — фіксована швидкість навчання (learning rate) для SGD.
+l2: float — коефіцієнт L2-регуляризації (0 — вимкнено).
+model_out: str — шлях для збереження моделі (.json).
+"""
 def train_mlp_sgd(
     Xtr, Ytr_pm1, Xval, Yval_pm1,
     model_cfg,
@@ -199,6 +228,8 @@ def train_mlp_sgd(
     l2=0.0,                     # регуляризація L2 (0 = вимкнено)
     model_out="model_simple.json"
 ):
+    # Побудова архітектури нейромережі
+    # Xtr.shape[1] - кількість стовпців ([0] - кількість рядків)
     sizes, activations = build_arch(Xtr.shape[1], model_cfg)
 
     # y вже в {-1,1}; залишаємо як є (з tanh добре працює MSE)
@@ -207,6 +238,7 @@ def train_mlp_sgd(
     Xtr = Xtr.astype(np.float32)
     Xval = Xval.astype(np.float32)
 
+    # Ініціалізація вагів та біасів
     params = init_uniform11(sizes, seed=model_cfg.get("seed", 42))
 
     print("\n[ARCH: simplest SGD]")
@@ -215,14 +247,20 @@ def train_mlp_sgd(
     print(" optimizer: SGD (fixed lr)")
     print(" lr:", lr)
 
+    # Створення словника логів конфігурації
     history = {"epoch": [], "train_mse": [], "val_mse": [], "val_acc": []}
 
     # ---- Оцінка ДО старту (epoch 0) ----
     Atr0, _ = forward(Xtr, params, activations)
     Av0,  _ = forward(Xval, params, activations)
+
+    # Atr0[-1] - значення виходу нейромережі до застосування активації
     train0 = mse_loss(Atr0[-1], Ytr)
     val0   = mse_loss(Av0[-1], Yval)
+
+    # val_acc — це частка правильно класифікованих валідаційних прикладів
     acc0   = accuracy_tanh(Av0[-1], Yval)
+
     print(f"epoch   0 | train_mse {train0:.5f} | val_mse {val0:.5f} | val_acc {acc0*100:6.2f}%")
 
     history["epoch"].append(0)
@@ -232,14 +270,28 @@ def train_mlp_sgd(
 
     # ---- Навчання ----
     for epoch in range(1, max_epochs+1):
+
+        # Прохід по кожному мінібатчу
         for Xb, Yb in batch_iter(Xtr, Ytr, batch_size=batch_size, shuffle=True,
                                  seed=model_cfg.get("seed", 0) + epoch):
-            A, Z = forward(Xb, params, activations)
-            grads = backward_mse(A, Yb, params, activations, l2=l2)
-            sgd_step(params, grads, lr=lr)
 
+            # Прохід можелі на кожному наборі кожного мінібатчу
+            A, Z = forward(Xb, params, activations)
+
+            # Зворотній прохід (backprop) і обчислення градієнтів
+            grads = backward_mse(A, Yb, params, activations, l2=l2)
+
+            # Оновлення ваг кроком SGD (звичайний градієнтний спуск, фіксований lr)
+            sgd_step(params, grads, learning_rate=lr)
+
+        """
+        Atr[-1] — вихід моделі на всьому тренувальному наборі Xtr,
+        Av[-1] — вихід на валідаційному наборі Xval.
+        """
         Atr, _ = forward(Xtr, params, activations)
         Av,  _ = forward(Xval, params, activations)
+
+
         train_mse = mse_loss(Atr[-1], Ytr)
         val_mse   = mse_loss(Av[-1], Yval)
         val_acc   = accuracy_tanh(Av[-1], Yval)
@@ -252,9 +304,15 @@ def train_mlp_sgd(
 
     save_model_json(model_out, sizes, activations, params)
     return params, history, (sizes, activations)
-
+"""
+params: dict з вагами та біасами ("W1","b1",...,"WL","bL"), np.float32.
+history: dict з ключами epoch, train_mse, val_mse, val_acc — списки однакової довжини.
+(sizes, activations): кортеж-архітектура (списки), щоб використовувати у predict(...)/збереженні.
+"""
 # ===================== 8) Інференс =====================
-
+"""
+Інференс - етап використання вже навченої моделі для отримання передбачень
+"""
 def predict(X, sizes, activations, params, mode="sign"):
     """Повертає або непороговані значення, або -1/1 за знаком."""
     A, _ = forward(X.astype(np.float32), params, activations)
@@ -266,8 +324,12 @@ def predict(X, sizes, activations, params, mode="sign"):
 # ===================== 9) Запуск прикладу =====================
 
 if __name__ == "__main__":
-    # читаємо дані
+    # читаємо дані датасету з файлу
     Xtr, Xval, Ytr, Yval = create_dataset("Train_Test_Windows_10.csv")
+
+    # Перетворення міток Y в NumPy-масив типу float32 (np.asarray(Ytr, dtype=np.float32))
+    # Приведення форми до двовимірної колонки (N, 1)
+    # -1 - підбір кількості рядків автоматично
     Ytr = np.asarray(Ytr, dtype=np.float32).reshape(-1, 1)
     Yval = np.asarray(Yval, dtype=np.float32).reshape(-1, 1)
 
@@ -275,7 +337,7 @@ if __name__ == "__main__":
     params, history, arch = train_mlp_sgd(
         Xtr, Ytr, Xval, Yval,
         MODEL,
-        max_epochs=1000, batch_size=100,
+        max_epochs=5000, batch_size=100,
         lr=1e-5,           # якщо падає занадто швидко — ще менше (1e-5)
         l2=0.0,
         model_out="model_simple.json"
