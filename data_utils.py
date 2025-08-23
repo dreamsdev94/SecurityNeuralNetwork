@@ -9,7 +9,7 @@
 - масштабування (MinMax у [-1,1] або Z-score)
 - повертає масиви NumPy: X_train, X_val, y_train, y_val
 
-За замовчуванням labels 0/1 мапляться у -1/1 (сумісно з твоїм кодом).
+За замовчуванням labels 0/1 мапляться у -1/1
 """
 
 from __future__ import annotations
@@ -20,70 +20,100 @@ from typing import Tuple, Dict, Any
 
 # ----------------------------- Стратифікований поділ -----------------------------
 
+"""
+Поділ датасету на тренувальний та валідаційний
+df - датасет
+test_size - частка валідаціного набору
+random_state - зерно ГВЧ для відтворювального перемішування
+Повертає два дата фрейма
+"""
 def stratified_split(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Поділ на train/val із збереженням пропорцій за групами (label, type).
-    Синглтони (групи з 1 рядком) залишаємо в train, щоб клас/тип не зник на train.
-    """
+    # Створення генератора випадкових чисел
     rng = np.random.default_rng(random_state)
 
-    if 'type' not in df.columns:
-        df = df.copy()
-        df['type'] = 'all'
+    # Формування серії key ка містить значення type
+    key = df['type'].astype(str)
 
-    key = df[['label', 'type']].astype(str).agg('_'.join, axis=1)
+    # Сворення списків для зберігання індексів рядків для тренувального та валідаційного наборів
+    train_idx = list()
+    val_idx = list()
 
-    train_idx, val_idx = [], []
+    # Створення словника {type: індекси відповідних рядків}
+    # У змінній idx опиняється список індексів рядків для однієї групи type
     for _, idx in key.groupby(key).groups.items():
         idx = list(idx)
+        # Перемішування індексів в межах групи
         rng.shuffle(idx)
+
+        # n - кількість рядків у поточній групі type
         n = len(idx)
+
+        # Якщо група має лише один рядок, він відразу потрапляє у train
         if n <= 1:
             train_idx.extend(idx)
             continue
+
+        # Обчислення, скільки елементів групи має потрапити у validation
         n_val = int(round(n * test_size))
+        # Гарантування, що у train ш validation буде хоча б один елемент
         n_val = max(1, min(n - 1, n_val))
+
+        # Відправляємо відповідну кількість рядків у train та validation
         val_idx.extend(idx[:n_val])
         train_idx.extend(idx[n_val:])
 
+    # створення датафреймів train і val, де беруться рядки df за зібраними індексами.
     train_df = df.loc[train_idx]
-    val_df   = df.loc[val_idx]
+    val_df = df.loc[val_idx]
     return train_df, val_df
 
-
-# ----------------------------- Допоміжні функції -----------------------------
-
+"""Очищення текстових колонок і приведення до чисел."""
 def _clean_to_numeric(X: pd.DataFrame) -> pd.DataFrame:
-    """Очищення текстових колонок і приведення до чисел."""
+    # Копіювання датафрейму
     X = X.copy()
+    # Вибираємо всі колонки де є текст
     obj = X.select_dtypes(include='object').columns
     if len(obj):
+        # ПРибирання пробілів, заміна ком на крапки
         X[obj] = X[obj].apply(lambda s: s.str.strip().str.replace(',', '.', regex=False))
+    # Перетворення всіх значень в числа
     X = X.apply(pd.to_numeric, errors='coerce')
     return X
 
+"""Обчислtyyz статистики на train"""
 def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
-    """Обчислюємо статистики ТІЛЬКИ на train для подальшого трансформу val."""
+
+    # Обчислення медіани по кожній колонці
     med = X_tr_df.median(numeric_only=True)
+    # Заповнення можливих пропусків медіанами
     X_tr_filled = X_tr_df.fillna(med)
 
     # відкидаємо константні колонки за train
+    # Обчислення мінімумів та максимумів для кожної колонки
     mins = X_tr_filled.min(axis=0)
     maxs = X_tr_filled.max(axis=0)
+    # Обчислення для кожної колонки різниці між мінімумом та максимумом
     ranges = maxs - mins
+    # СТворення булевого масиву із вказанням неконстантних колонок
     keep_mask = ranges != 0
 
+    # Створення словнику зі статистикою
     stats = {
         "median": med,
         "keep_mask": keep_mask
     }
 
+    # Нормалізація рядку scaling (приведення у нижній регістр)
     scaling = scaling.lower()
+
+
     if scaling == "minmax":
         stats.update({
             "mins": mins[keep_mask],
             "ranges": ranges[keep_mask]
         })
+
+
     elif scaling == "zscore":
         mu = X_tr_filled.loc[:, keep_mask].mean(axis=0)
         sd = X_tr_filled.loc[:, keep_mask].std(axis=0, ddof=0).replace(0, 1.0)
