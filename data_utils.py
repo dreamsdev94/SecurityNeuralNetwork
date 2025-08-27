@@ -80,7 +80,7 @@ def _clean_to_numeric(X: pd.DataFrame) -> pd.DataFrame:
     X = X.apply(pd.to_numeric, errors='coerce')
     return X
 
-"""Обчислtyyz статистики на train"""
+"""Обчисллення статистики на train"""
 def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
 
     # Обчислення медіани по кожній колонці
@@ -126,20 +126,30 @@ def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
 
     return stats
 
+"""Застосовуємо статистики train до довільної частини (train/val)."""
 def _apply_stats(df_part: pd.DataFrame, stats: Dict[str, Any], scaling: str) -> pd.DataFrame:
-    """Застосовуємо статистики train до довільної частини (train/val)."""
+    # Робимо копію вхідних даних
     X = df_part.copy()
+    # median — серія медіан по колонках (рахувалась на train)
     med = stats["median"]
+    # keep_mask — булева серія по колонках: True для не константних фіч(їх лишаємо), False для константних(відкидаємо)
     keep_mask = stats["keep_mask"]
 
+    # Заповнюємо пропуски медіанами з train.
+    # Pandas вирівнює по іменах колонок, тож у кожній колонці береться «її» медіана. Непридатні/відсутні колонки ігноруються.
     X = X.fillna(med)
+
+    # Відкидаємо константні колонки(де keep_mask == False), залишаємо лише інформативні.
     X = X.loc[:, keep_mask]
 
+    # Нормалізуємо параметр (щоб "MinMax"/"MINMAX" тощо теж спрацювали).
     scaling = scaling.lower()
+
     if scaling == "minmax":
         mins = stats["mins"]
         ranges = stats["ranges"]
         X = -1 + (X - mins) * 2 / ranges
+
     elif scaling == "zscore":
         mu = stats["mean"]
         sd = stats["std"]
@@ -151,7 +161,13 @@ def _apply_stats(df_part: pd.DataFrame, stats: Dict[str, Any], scaling: str) -> 
 
 
 # ----------------------------- Основна функція -----------------------------
-
+"""
+filename — шлях до CSV.
+test_size — частка валідації.
+random_state — зерно для відтворюваного поділу.
+scaling — "minmax" або "zscore".
+return_meta — якщо True, повертає ще й метадані.
+"""
 def create_dataset(
     filename: str,
     test_size: float = 0.2,
@@ -159,21 +175,13 @@ def create_dataset(
     scaling: str = "minmax",
     return_meta: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
-    """
-    Зчитує CSV та повертає (X_train, X_val, y_train, y_val) як np.ndarray.
-    - Масштабування: 'minmax' у [-1,1] (за train) або 'zscore' (стандартизація за train).
-    - labels 0/1 мапляться у -1/1. Якщо вже -1/1 — лишаємо як є.
-    - 'type' використовується тільки для стратифікації; з ознак видаляється.
-    - Без data leakage: усі статистики рахуються по train і застосовуються до val.
 
-    Якщо return_meta=True — додатково повертає словник метаданих зі статистиками.
-    """
     df = pd.read_csv(filename)
 
-    # 1) Стратифікація ДО будь-яких перетворень
+    # Ділимо сирі дані на train/val із збереженням пропорцій за type
     train_df, val_df = stratified_split(df, test_size=test_size, random_state=random_state)
 
-    # 2) Цільові мітки
+    # Цільові мітки
     def map_target(series: pd.Series) -> np.ndarray:
         uniq = set(series.dropna().unique())
         if uniq <= {0, 1}:
