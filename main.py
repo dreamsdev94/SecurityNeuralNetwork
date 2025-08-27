@@ -224,41 +224,40 @@ def train_mlp_sgd(
     Xtr, Ytr_pm1, Xval, Yval_pm1,
     model_cfg,
     max_epochs=200, batch_size=64,
-    lr=1e-4,                    # невеликий, щоб рух був поступовим
-    l2=0.0,                     # регуляризація L2 (0 = вимкнено)
-    model_out="model_simple.json"
+    lr=1e-4,
+    l2=0.0,
+    model_out="model_simple.json",
+    # --- Early Stopping ---
+    patience=10,             # скільки епох чекати без покращення
+    min_delta=0.0,           # мінімальне покращення метрики, щоб "зарахувати" прогрес
+    monitor="val_mse",       # яку метрику моніторити: "val_mse" або "val_acc"
+    mode=None                # "min" для лоссів, "max" для метрик типу accuracy; якщо None — визначиться автоматично
 ):
-    # Побудова архітектури нейромережі
-    # Xtr.shape[1] - кількість стовпців ([0] - кількість рядків)
+    # Побудова архітектури
     sizes, activations = build_arch(Xtr.shape[1], model_cfg)
 
-    # y вже в {-1,1}; залишаємо як є (з tanh добре працює MSE)
+    # Каст типів
     Ytr = Ytr_pm1.astype(np.float32)
     Yval = Yval_pm1.astype(np.float32)
     Xtr = Xtr.astype(np.float32)
     Xval = Xval.astype(np.float32)
 
-    # Ініціалізація вагів та біасів
+    # Параметри
     params = init_uniform11(sizes, seed=model_cfg.get("seed", 42))
 
-    print("\n[ARCH: simplest SGD]")
+    print("\n[ARCH: simplest SGD + EarlyStopping]")
     print(" sizes:", sizes)
     print(" activations:", activations)
     print(" optimizer: SGD (fixed lr)")
     print(" lr:", lr)
 
-    # Створення словника логів конфігурації
     history = {"epoch": [], "train_mse": [], "val_mse": [], "val_acc": []}
 
-    # ---- Оцінка ДО старту (epoch 0) ----
+    # Початкова оцінка (epoch 0)
     Atr0, _ = forward(Xtr, params, activations)
     Av0,  _ = forward(Xval, params, activations)
-
-    # Atr0[-1] - значення виходу нейромережі до застосування активації
     train0 = mse_loss(Atr0[-1], Ytr)
     val0   = mse_loss(Av0[-1], Yval)
-
-    # val_acc — це частка правильно класифікованих валідаційних прикладів
     acc0   = accuracy_tanh(Av0[-1], Yval)
 
     print(f"epoch   0 | train_mse {train0:.5f} | val_mse {val0:.5f} | val_acc {acc0*100:6.2f}%")
@@ -268,29 +267,33 @@ def train_mlp_sgd(
     history["val_mse"].append(val0)
     history["val_acc"].append(acc0)
 
-    # ---- Навчання ----
-    for epoch in range(1, max_epochs+1):
+    # --- Early stopping setup ---
+    if mode is None:
+        mode = "min" if monitor.endswith("mse") or "loss" in monitor else "max"
+    if mode not in ("min", "max"):
+        raise ValueError("mode must be 'min' or 'max'")
 
-        # Прохід по кожному мінібатчу
+    best_score = float("inf") if mode == "min" else -float("inf")
+    patience_counter = 0
+    best_params = {k: v.copy() for k, v in params.items()}
+    best_epoch = 0
+
+    def is_improved(curr, best):
+        if mode == "min":
+            return (best - curr) > min_delta
+        else:
+            return (curr - best) > min_delta
+
+    # Навчання
+    for epoch in range(1, max_epochs + 1):
         for Xb, Yb in batch_iter(Xtr, Ytr, batch_size=batch_size, shuffle=True,
                                  seed=model_cfg.get("seed", 0) + epoch):
-
-            # Прохід можелі на кожному наборі кожного мінібатчу
-            A, Z = forward(Xb, params, activations)
-
-            # Зворотній прохід (backprop) і обчислення градієнтів
+            A, _ = forward(Xb, params, activations)
             grads = backward_mse(A, Yb, params, activations, l2=l2)
-
-            # Оновлення ваг кроком SGD (звичайний градієнтний спуск, фіксований lr)
             sgd_step(params, grads, learning_rate=lr)
 
-        """
-        Atr[-1] — вихід моделі на всьому тренувальному наборі Xtr,
-        Av[-1] — вихід на валідаційному наборі Xval.
-        """
         Atr, _ = forward(Xtr, params, activations)
         Av,  _ = forward(Xval, params, activations)
-
 
         train_mse = mse_loss(Atr[-1], Ytr)
         val_mse   = mse_loss(Av[-1], Yval)
@@ -302,6 +305,22 @@ def train_mlp_sgd(
         history["val_mse"].append(val_mse)
         history["val_acc"].append(val_acc)
 
+        # --- Early stopping check ---
+        curr_score = val_mse if monitor == "val_mse" else val_acc
+        if is_improved(curr_score, best_score):
+            best_score = curr_score
+            patience_counter = 0
+            best_params = {k: v.copy() for k, v in params.items()}
+            best_epoch = epoch
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch} (best {monitor} at epoch {best_epoch}: {best_score:.6f})")
+                # Повертаємо кращі ваги
+                params = best_params
+                break
+
+    # Зберігаємо кращу модель
     save_model_json(model_out, sizes, activations, params)
     return params, history, (sizes, activations)
 """
@@ -338,9 +357,9 @@ if __name__ == "__main__":
         Xtr, Ytr, Xval, Yval,
         MODEL,
         max_epochs=5000, batch_size=100,
-        lr=1e-5,           # якщо падає занадто швидко — ще менше (1e-5)
-        l2=0.0,
-        model_out="model_simple.json"
+        lr=1e-4, l2=0.0,
+        model_out="model_simple.json",
+        patience=10, min_delta=1e-5, monitor="val_mse", mode="min"
     )
 
     sizes, activations = arch
@@ -350,7 +369,10 @@ if __name__ == "__main__":
     plt.plot(history["epoch"], history["train_mse"], label="train_mse", alpha=0.7)
     plt.xlabel("Epoch"); plt.ylabel("MSE"); plt.grid(True); plt.legend()
     plt.title("Навчання MLP (SGD + MSE, tanh)")
-    plt.show()
+
+
+    plt.savefig("training_mse.png", dpi=300, bbox_inches="tight")
+    plt.close()
 
     # фінальна точність за знаком
     y_pred = predict(Xval, sizes, activations, params, mode="sign")
