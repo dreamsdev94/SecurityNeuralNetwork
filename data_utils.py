@@ -1,15 +1,12 @@
 # data_utils.py
 # -*- coding: utf-8 -*-
 """
-Утиліти для підготовки датасету:
-- стратифікований поділ за комбінацією (label, type) без reset_index
-- очищення та приведення ознак до числового виду
-- імпутація пропусків за медіаною ТІЛЬКИ зі статистик train
-- відкидання константних колонок за train
-- масштабування (MinMax у [-1,1] або Z-score)
-- повертає масиви NumPy: X_train, X_val, y_train, y_val
-
-За замовчуванням labels 0/1 мапляться у -1/1
+Утиліти для підготовки датасету під мультиклас (type):
+- стратифікований поділ за колонкою 'type' (без reset_index)
+- ознаки -> числові, імпутація медіанами train, відкидання константних колонок
+- масштабування (MinMax у [-1,1] або Z-score) за статистиками train
+- ТАРГЕТ: one-vs-rest у {-1, 1} з колонки 'type' (мультиклас)
+- Повертає: X_train, X_val, y_train, y_val (NumPy)
 """
 
 from __future__ import annotations
@@ -20,139 +17,81 @@ from typing import Tuple, Dict, Any
 
 # ----------------------------- Стратифікований поділ -----------------------------
 
-"""
-Поділ датасету на тренувальний та валідаційний
-df - датасет
-test_size - частка валідаціного набору
-random_state - зерно ГВЧ для відтворювального перемішування
-Повертає два дата фрейма
-"""
 def stratified_split(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    # Створення генератора випадкових чисел
+    """Стратифікація за 'type' (категорія аномалії)."""
     rng = np.random.default_rng(random_state)
+    if 'type' not in df.columns:
+        raise ValueError("У датасеті відсутня колонка 'type' — потрібна для мультикласової цілі.")
 
-    # Формування серії key ка містить значення type
     key = df['type'].astype(str)
+    train_idx, val_idx = [], []
 
-    # Сворення списків для зберігання індексів рядків для тренувального та валідаційного наборів
-    train_idx = list()
-    val_idx = list()
-
-    # Створення словника {type: індекси відповідних рядків}
-    # У змінній idx опиняється список індексів рядків для однієї групи type
     for _, idx in key.groupby(key).groups.items():
         idx = list(idx)
-        # Перемішування індексів в межах групи
         rng.shuffle(idx)
-
-        # n - кількість рядків у поточній групі type
         n = len(idx)
-
-        # Якщо група має лише один рядок, він відразу потрапляє у train
         if n <= 1:
             train_idx.extend(idx)
             continue
-
-        # Обчислення, скільки елементів групи має потрапити у validation
         n_val = int(round(n * test_size))
-        # Гарантування, що у train ш validation буде хоча б один елемент
         n_val = max(1, min(n - 1, n_val))
-
-        # Відправляємо відповідну кількість рядків у train та validation
         val_idx.extend(idx[:n_val])
         train_idx.extend(idx[n_val:])
 
-    # створення датафреймів train і val, де беруться рядки df за зібраними індексами.
     train_df = df.loc[train_idx]
     val_df = df.loc[val_idx]
     return train_df, val_df
 
-"""Очищення текстових колонок і приведення до чисел."""
+
+# ----------------------------- Очистка та статистики -----------------------------
+
 def _clean_to_numeric(X: pd.DataFrame) -> pd.DataFrame:
-    # Копіювання датафрейму
     X = X.copy()
-    # Вибираємо всі колонки де є текст
     obj = X.select_dtypes(include='object').columns
     if len(obj):
-        # ПРибирання пробілів, заміна ком на крапки
         X[obj] = X[obj].apply(lambda s: s.str.strip().str.replace(',', '.', regex=False))
-    # Перетворення всіх значень в числа
     X = X.apply(pd.to_numeric, errors='coerce')
     return X
 
-"""Обчисллення статистики на train"""
-def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
 
-    # Обчислення медіани по кожній колонці
+def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
     med = X_tr_df.median(numeric_only=True)
-    # Заповнення можливих пропусків медіанами
     X_tr_filled = X_tr_df.fillna(med)
 
-    # відкидаємо константні колонки за train
-    # Обчислення мінімумів та максимумів для кожної колонки
     mins = X_tr_filled.min(axis=0)
     maxs = X_tr_filled.max(axis=0)
-    # Обчислення для кожної колонки різниці між мінімумом та максимумом
     ranges = maxs - mins
-    # СТворення булевого масиву із вказанням неконстантних колонок
     keep_mask = ranges != 0
 
-    # Створення словнику зі статистикою
-    stats = {
-        "median": med,
-        "keep_mask": keep_mask
-    }
-
-    # Нормалізація рядку scaling (приведення у нижній регістр)
+    stats = {"median": med, "keep_mask": keep_mask}
     scaling = scaling.lower()
 
-
     if scaling == "minmax":
-        stats.update({
-            "mins": mins[keep_mask],
-            "ranges": ranges[keep_mask]
-        })
-
-
+        stats.update({"mins": mins[keep_mask], "ranges": ranges[keep_mask]})
     elif scaling == "zscore":
         mu = X_tr_filled.loc[:, keep_mask].mean(axis=0)
         sd = X_tr_filled.loc[:, keep_mask].std(axis=0, ddof=0).replace(0, 1.0)
-        stats.update({
-            "mean": mu,
-            "std": sd
-        })
+        stats.update({"mean": mu, "std": sd})
     else:
         raise ValueError("scaling must be 'minmax' or 'zscore'")
 
     return stats
 
-"""Застосовуємо статистики train до довільної частини (train/val)."""
+
 def _apply_stats(df_part: pd.DataFrame, stats: Dict[str, Any], scaling: str) -> pd.DataFrame:
-    # Робимо копію вхідних даних
     X = df_part.copy()
-    # median — серія медіан по колонках (рахувалась на train)
     med = stats["median"]
-    # keep_mask — булева серія по колонках: True для не константних фіч(їх лишаємо), False для константних(відкидаємо)
     keep_mask = stats["keep_mask"]
 
-    # Заповнюємо пропуски медіанами з train.
-    # Pandas вирівнює по іменах колонок, тож у кожній колонці береться «її» медіана. Непридатні/відсутні колонки ігноруються.
     X = X.fillna(med)
-
-    # Відкидаємо константні колонки(де keep_mask == False), залишаємо лише інформативні.
     X = X.loc[:, keep_mask]
 
-    # Нормалізуємо параметр (щоб "MinMax"/"MINMAX" тощо теж спрацювали).
     scaling = scaling.lower()
-
     if scaling == "minmax":
-        mins = stats["mins"]
-        ranges = stats["ranges"]
+        mins = stats["mins"]; ranges = stats["ranges"]
         X = -1 + (X - mins) * 2 / ranges
-
     elif scaling == "zscore":
-        mu = stats["mean"]
-        sd = stats["std"]
+        mu = stats["mean"]; sd = stats["std"]
         X = (X - mu) / sd
     else:
         raise ValueError("scaling must be 'minmax' or 'zscore'")
@@ -161,13 +100,7 @@ def _apply_stats(df_part: pd.DataFrame, stats: Dict[str, Any], scaling: str) -> 
 
 
 # ----------------------------- Основна функція -----------------------------
-"""
-filename — шлях до CSV.
-test_size — частка валідації.
-random_state — зерно для відтворюваного поділу.
-scaling — "minmax" або "zscore".
-return_meta — якщо True, повертає ще й метадані.
-"""
+
 def create_dataset(
     filename: str,
     test_size: float = 0.2,
@@ -178,34 +111,43 @@ def create_dataset(
 
     df = pd.read_csv(filename)
 
-    # Ділимо сирі дані на train/val із збереженням пропорцій за type
+    if 'type' not in df.columns:
+        raise ValueError("У CSV немає колонки 'type' — вона потрібна як ціль (мультиклас).")
+
+    # Поділ на train/val
     train_df, val_df = stratified_split(df, test_size=test_size, random_state=random_state)
 
-    # Цільові мітки
-    def map_target(series: pd.Series) -> np.ndarray:
-        uniq = set(series.dropna().unique())
-        if uniq <= {0, 1}:
-            arr = series.map({0: -1, 1: 1}).to_numpy().reshape(-1, 1)
-        else:
-            arr = series.to_numpy().reshape(-1, 1)
-        return arr.astype(np.float32)
+    # ---- Мультикласовий таргет з 'type' ----
+    # визначимо всі унікальні типи на всьому датасеті (стабільний словник класів)
+    all_types = pd.Index(df['type'].astype(str).unique())
+    all_types = all_types.sort_values()  # стабільний порядок
+    type2idx = {t: i for i, t in enumerate(all_types)}
+    idx2type = {i: t for t, i in type2idx.items()}
+    C = len(type2idx)
 
-    y_train = map_target(train_df['label'])
-    y_val   = map_target(val_df['label'])
+    def encode_type_to_pm1(series: pd.Series) -> np.ndarray:
+        """One-vs-rest у {-1, 1} для списку міток 'type'."""
+        idx = series.astype(str).map(type2idx).to_numpy()
+        N = idx.shape[0]
+        Y = -np.ones((N, C), dtype=np.float32)
+        Y[np.arange(N), idx] = 1.0
+        return Y
 
-    # 3) Ознаки: спільний пул колонок (без label/type)
+    y_train = encode_type_to_pm1(train_df['type'])
+    y_val   = encode_type_to_pm1(val_df['type'])
+
+    # ---- Ознаки ----
+    # Викидаємо з фіч і 'label', і 'type' на випадок наявності обох.
     feat_cols = df.drop(columns=['label', 'type'], errors='ignore').columns.tolist()
 
     X_all = _clean_to_numeric(df[feat_cols])
     X_tr_df = X_all.loc[train_df.index].copy()
     X_va_df = X_all.loc[val_df.index].copy()
 
-    # 4) Підганяємо статистики на train і застосовуємо
     stats = _fit_stats_train(X_tr_df, scaling=scaling)
     X_tr = _apply_stats(X_tr_df, stats, scaling=scaling)
     X_va = _apply_stats(X_va_df, stats, scaling=scaling)
 
-    # 5) У NumPy (float32)
     X_train = X_tr.to_numpy(dtype=np.float32)
     X_val   = X_va.to_numpy(dtype=np.float32)
 
@@ -216,8 +158,10 @@ def create_dataset(
         "scaling": scaling.lower(),
         "columns_all": feat_cols,
         "kept_columns": X_tr.columns.tolist(),
+        "classes": list(all_types),
+        "type2idx": type2idx,
+        "idx2type": idx2type,
         "stats": {
-            # серіалізовані у dict для можливого збереження в JSON
             k: (v.to_dict() if hasattr(v, "to_dict") else v)
             for k, v in stats.items()
         }
@@ -228,16 +172,15 @@ def create_dataset(
 # ----------------------------- Аудит (опційно) -----------------------------
 
 def audit_split(df: pd.DataFrame, train_idx: np.ndarray, val_idx: np.ndarray, test_size: float = 0.2) -> pd.DataFrame:
-    """
-    Допоміжний звіт розподілу за групами label+type. Повертає DataFrame зі статистикою.
-    """
+    """Допоміжний звіт розподілу за групами label+type."""
     assert set(train_idx).isdisjoint(set(val_idx)), "Перетин індексів train/val!"
     assert len(train_idx) + len(val_idx) == len(df), "Є втрачені/задвоєні рядки!"
 
     if 'type' not in df.columns:
         df = df.copy(); df['type'] = 'all'
 
-    full = df.assign(group=df[['label','type']].astype(str).agg('_'.join, axis=1))
+    full = df.assign(group=df[['label','type']].astype(str).agg('_'.join, axis=1) if 'label' in df.columns
+                     else df['type'].astype(str))
     tr = full.loc[train_idx]; va = full.loc[val_idx]
 
     g_full = full['group'].value_counts().sort_index()
@@ -250,7 +193,6 @@ def audit_split(df: pd.DataFrame, train_idx: np.ndarray, val_idx: np.ndarray, te
         'val': g_va,
         'val_ratio(%)': (100.0 * g_va / g_full).round(1)
     })
-    # Глобальна частка для довідки
     report.attrs['global_val_ratio_%'] = round(100*len(val_idx)/len(df), 2)
     report.attrs['expected_%'] = int(test_size*100)
     return report
