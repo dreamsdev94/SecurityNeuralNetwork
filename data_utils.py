@@ -1,149 +1,215 @@
-# -*- coding: utf-8 -*-
-"""
-Допоміжні утиліти:
-- стратифікований поділ за 'type'
-- ознаки -> числові; ІМПУТАЦІЯ медіанами train; МАСШТАБУВАННЯ (MinMax у [-1,1] або Z-score)
-- НІЧОГО НЕ ВИДАЛЯЄМО з ознак (навіть константні колонки залишаються)
-- ТАРГЕТИ:
-    * y_type: one-vs-rest у {-1,+1} з 'type' (мультиклас)
-    * y_label: якщо є колонка 'label' — у {-1,+1} (зберігається в meta)
-Повертає: X_train, X_val, y_type_train, y_type_val (та meta при return_meta=True)
-"""
-from __future__ import annotations
-from typing import Tuple, Dict, Any
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 
-def stratified_split(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Стратифікація за 'type' (категорія)."""
-    rng = np.random.default_rng(random_state)
-    if 'type' not in df.columns:
-        raise ValueError("Немає 'type' — потрібна для мультикласу.")
-    key = df['type'].astype(str)
-    train_idx, val_idx = [], []
-    for _, idx in key.groupby(key).groups.items():
-        idx = list(idx); rng.shuffle(idx)
-        n = len(idx)
-        if n <= 1:
-            train_idx.extend(idx); continue
-        n_val = int(round(n * test_size))
-        n_val = max(1, min(n - 1, n_val))
-        val_idx.extend(idx[:n_val]); train_idx.extend(idx[n_val:])
-    return df.loc[train_idx], df.loc[val_idx]
+# =====================================================================
+#  Головна функція підготовки датасету
+# =====================================================================
+def create_dataset(
+        csv_path: str,
+        test_size: float = 0.2,
+        random_state: int = 42,
+        scaling: str = "zscore",
+        return_meta: bool = False
+):
+    """
+    Підготовка датасету:
+    1. Завантаження CSV
+    2. Видалення рядків з >30% пропусків
+    3. Видалення константних стовпців
+    4. Видалення дублікатів
+    5. Приведення всіх ознак до числового формату
+    6. Oversampling меншого класу (по 'type')
+    7. Імпутація пропусків медіаною
+    8. Нормалізація (Z-score або MinMax)
+    9. Розбиття train/val з стратифікацією по 'type'
+    10. Кодування цільових міток:
+        - бінарна: {-1,+1}
+        - мультикласова: one-hot {-1,+1}
+    """
+
+    # ================================================================
+    # 1. Читання CSV
+    # ================================================================
+    df = pd.read_csv(csv_path)
+    print(f"[load] Loaded shape: {df.shape}")
+
+    # ================================================================
+    # 2. Видалення рядків із >30% пропусків
+    # ================================================================
+    nan_fraction = df.isna().mean(axis=1)
+    before = len(df)
+    df = df.loc[nan_fraction <= 0.30].copy()
+    print(f"[clean] Removed rows >30% NaN: {before - len(df)}")
+
+    # ================================================================
+    # 3. Видалення константних стовпців
+    # ================================================================
+    const_cols = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
+    df = df.drop(columns=const_cols)
+    print(f"[clean] Removed constant columns: {const_cols}")
+
+    # ================================================================
+    # 4. Видалення дублікатів
+    # ================================================================
+    before = len(df)
+    df = df.drop_duplicates()
+    print(f"[clean] Removed duplicates: {before - len(df)}")
+
+    # ================================================================
+    # 5. Примусове приведення всіх числових ознак до float
+    # ================================================================
+    for col in df.columns:
+        if col not in ["label", "type"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # ================================================================
+    #  Перевірка ключових колонок
+    # ================================================================
+    if "type" not in df.columns:
+        raise ValueError("Column 'type' missing in dataset")
+
+    if "label" not in df.columns:
+        raise ValueError("Column 'label' missing in dataset")
+
+    # ================================================================
+    # 6. OVERSAMPLING меншого класу
+    # ================================================================
+    counts = df["type"].value_counts()
+    max_count = counts.max()
+
+    df_extra = []
+    for cls, cnt in counts.items():
+        subset = df[df["type"] == cls]
+        if cnt < max_count:
+            reps = max_count - cnt
+            extra = subset.sample(reps, replace=True, random_state=random_state)
+            df_extra.append(extra)
+
+    if len(df_extra) > 0:
+        df = pd.concat([df] + df_extra, ignore_index=True)
+
+    print("[oversampling] New class distribution:")
+    print(df["type"].value_counts())
+
+    # ================================================================
+    # 7. Розділення на ознаки і target
+    # ================================================================
+    feature_cols = [c for c in df.columns if c not in ["label", "type"]]
+
+    # Примусове перетворення на numeric (важливо після oversampling)
+    df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
+
+    X = df[feature_cols].copy()        # ознаки
+    label_bin = df["label"].copy()     # бінарний label
+    label_type = df["type"].copy()     # мультикласовий label
+
+    # ================================================================
+    # 8. Кодування міток
+    # ================================================================
+    # 8.1. Бінарний {-1,+1}
+    ybin = label_bin.map(lambda x: 1.0 if x == 1 else -1.0).values.reshape(-1, 1)
+
+    # 8.2. One-hot {-1,+1}
+    classes = sorted(label_type.unique())
+    Y_type = pd.get_dummies(label_type)[classes].values
+    Y_pm1 = 2 * Y_type - 1
+
+    # ================================================================
+    # 9. Розбиття train/val
+    # ================================================================
+    Xtr, Xva, ybin_tr, ybin_va, Ytr_type, Yva_type = train_test_split(
+        X, ybin, Y_pm1,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=label_type
+    )
+
+    print(f"[split] Train: {Xtr.shape}, Val: {Xva.shape}")
+
+    # ================================================================
+    # 10. Імпутація та нормалізація
+    # ================================================================
+    stats = _fit_stats_train(Xtr, scaling=scaling)
+
+    Xtr = _apply_stats(Xtr, stats, scaling=scaling)
+    Xva = _apply_stats(Xva, stats, scaling=scaling)
+
+    # ================================================================
+    #  Повернення результатів
+    # ================================================================
+    meta = {
+        "classes": classes,
+        "kept_columns": feature_cols,
+        "scaling": scaling,
+        "stats": stats
+    }
+
+    if return_meta:
+        return (
+            Xtr.values.astype(np.float32),
+            Xva.values.astype(np.float32),
+            Ytr_type.astype(np.float32),
+            Yva_type.astype(np.float32),
+            meta
+        )
+
+    return (
+        Xtr.values.astype(np.float32),
+        Xva.values.astype(np.float32),
+        Ytr_type.astype(np.float32),
+        Yva_type.astype(np.float32)
+    )
 
 
-def _clean_to_numeric(X: pd.DataFrame) -> pd.DataFrame:
-    X = X.copy()
-    obj = X.select_dtypes(include='object').columns
-    if len(obj):
-        X[obj] = X[obj].apply(lambda s: s.str.strip().str.replace(',', '.', regex=False))
-    X = X.apply(pd.to_numeric, errors='coerce')
-    return X
+# =====================================================================
+#  Обчислення статистики нормалізації
+# =====================================================================
+def _fit_stats_train(X_df: pd.DataFrame, scaling: str):
+    stats = {}
 
+    # імпутація медіаною
+    med = X_df.median(numeric_only=True)
+    stats["median"] = med
 
-def _fit_stats_train(X_tr_df: pd.DataFrame, scaling: str) -> Dict[str, Any]:
-    """Готуємо статистики ТІЛЬКИ з train. НІЧОГО НЕ ВИДАЛЯЄМО."""
-    med = X_tr_df.median(numeric_only=True)
-    X_tr_filled = X_tr_df.fillna(med)
+    X_filled = X_df.fillna(med)
 
-    mins = X_tr_filled.min(axis=0)
-    maxs = X_tr_filled.max(axis=0)
-    ranges = maxs - mins
-    # без видалення: захистимося від ділення на 0
-    ranges_safe = ranges.replace(0, 1.0) if hasattr(ranges, "replace") else np.where(ranges == 0, 1.0, ranges)
-
-    stats = {"median": med, "mins": mins, "maxs": maxs, "ranges_safe": ranges_safe}
     scaling = scaling.lower()
+
     if scaling == "zscore":
-        mu = X_tr_filled.mean(axis=0)
-        sd = X_tr_filled.std(axis=0, ddof=0).replace(0, 1.0)
-        stats.update({"mean": mu, "std": sd})
-    elif scaling != "minmax":
-        raise ValueError("scaling must be 'minmax' or 'zscore'")
+        mu = X_filled.mean(axis=0)
+        sd = X_filled.std(axis=0, ddof=0).replace(0, 1.0)
+        stats["mean"] = mu
+        stats["std"] = sd
+
+    elif scaling == "minmax":
+        mins = X_filled.min(axis=0)
+        maxs = X_filled.max(axis=0)
+        ranges = (maxs - mins).replace(0, 1.0)
+        stats["mins"] = mins
+        stats["ranges_safe"] = ranges
+
+    else:
+        raise ValueError("Unknown scaling method")
+
     return stats
 
 
-def _apply_stats(df_part: pd.DataFrame, stats: Dict[str, Any], scaling: str) -> pd.DataFrame:
-    X = df_part.copy()
+# =====================================================================
+#  Застосування нормалізації
+# =====================================================================
+def _apply_stats(X_df: pd.DataFrame, stats: dict, scaling: str):
+    X = X_df.copy()
     X = X.fillna(stats["median"])
+
     scaling = scaling.lower()
-    if scaling == "minmax":
-        mins = stats["mins"]; ranges = stats["ranges_safe"]
-        X = -1 + (X - mins) * 2 / ranges
-    elif scaling == "zscore":
-        mu = stats["mean"]; sd = stats["std"]
-        X = (X - mu) / sd
+
+    if scaling == "zscore":
+        return (X - stats["mean"]) / stats["std"]
+
+    elif scaling == "minmax":
+        return -1 + (X - stats["mins"]) * 2 / stats["ranges_safe"]
+
     else:
-        raise ValueError("scaling must be 'minmax' or 'zscore'")
-    return X
-
-
-def create_dataset(
-    filename: str,
-    test_size: float = 0.2,
-    random_state: int = 42,
-    scaling: str = "minmax",
-    return_meta: bool = False
-):
-    df = pd.read_csv(filename)
-    if 'type' not in df.columns:
-        raise ValueError("У CSV немає 'type' — потрібна як мультикласова ціль.")
-
-    # 1) Поділ
-    train_df, val_df = stratified_split(df, test_size=test_size, random_state=random_state)
-
-    # 2) Мультиклас (type) -> one-vs-rest у {-1,+1}
-    all_types = pd.Index(df['type'].astype(str).unique()).sort_values()
-    type2idx = {t: i for i, t in enumerate(all_types)}
-    idx2type = {i: t for t, i in type2idx.items()}
-    C = len(type2idx)
-
-    def encode_type_pm1(series: pd.Series) -> np.ndarray:
-        idx = series.astype(str).map(type2idx).to_numpy()
-        N = idx.shape[0]
-        Y = -np.ones((N, C), dtype=np.float32)
-        Y[np.arange(N), idx] = 1.0
-        return Y
-
-    y_type_train = encode_type_pm1(train_df['type'])
-    y_type_val   = encode_type_pm1(val_df['type'])
-
-    # 3) Ознаки (нічого не видаляємо)
-    feat_cols = df.drop(columns=['label', 'type'], errors='ignore').columns.tolist()
-    X_all = _clean_to_numeric(df[feat_cols])
-    X_tr_df = X_all.loc[train_df.index].copy()
-    X_va_df = X_all.loc[val_df.index].copy()
-
-    stats = _fit_stats_train(X_tr_df, scaling=scaling)
-    X_tr = _apply_stats(X_tr_df, stats, scaling=scaling)
-    X_va = _apply_stats(X_va_df, stats, scaling=scaling)
-
-    X_train = X_tr.to_numpy(dtype=np.float32)
-    X_val   = X_va.to_numpy(dtype=np.float32)
-
-    if not return_meta:
-        return X_train, X_val, y_type_train, y_type_val
-
-    # 4) Додатково: бінарний label (якщо є) у {-1,+1}, повертаємо через meta
-    y_label_train = y_label_val = None
-    if 'label' in df.columns:
-        def encode_label_pm1(series: pd.Series) -> np.ndarray:
-            a = pd.to_numeric(series, errors='coerce').fillna(0).to_numpy()
-            a = np.where(a > 0, 1.0, -1.0).astype(np.float32).reshape(-1, 1)
-            return a
-        y_label_train = encode_label_pm1(train_df['label'])
-        y_label_val   = encode_label_pm1(val_df['label'])
-
-    meta = dict(
-        scaling=scaling.lower(),
-        columns_all=feat_cols,
-        kept_columns=X_tr.columns.tolist(),  # фактично всі
-        classes=list(all_types),
-        type2idx=type2idx,
-        idx2type=idx2type,
-        stats={k: (v.to_dict() if hasattr(v, "to_dict") else v) for k, v in stats.items()},
-        y_label_train=y_label_train,
-        y_label_val=y_label_val
-    )
-    return X_train, X_val, y_type_train, y_type_val, meta
+        raise ValueError("Unknown scaling")
