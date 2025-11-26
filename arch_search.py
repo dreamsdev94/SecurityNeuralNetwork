@@ -1,6 +1,3 @@
-# arch_search.py
-# -*- coding: utf-8 -*-
-
 import os
 import time
 import numpy as np
@@ -9,192 +6,293 @@ import matplotlib.pyplot as plt
 
 from data_utils import create_dataset
 from network import Network
-import metrics as M
 
 
-# ======================================================================
-# Допоміжні функції
-# ======================================================================
+# --------------------------------------------------------------
+#   НАЛАШТУВАННЯ ГРУП АРХІТЕКТУР
+# --------------------------------------------------------------
 
-def run_architecture(layers, Xtr, Ytr, Xva, Yva, max_epochs=300, seed=123):
+# Кількість прихованих шарів для "компактних" мереж
+COMPACT_HIDDEN_LAYERS = [1, 2, 3, 4, 5]
+
+# Кількість прихованих шарів для "глибоких" мереж
+# (останній варіант, який ми ганяли в Colab — до 100 шарів)
+# Якщо захочеш, можна розширити до 250, 500, 1000.
+DEEP_HIDDEN_LAYERS = [10, 25, 50, 75, 100]
+
+# Початкова ширина (кількість нейронів) для першого прихованого шару
+COMPACT_START_WIDTH = 256
+DEEP_START_WIDTH = 512
+
+
+# --------------------------------------------------------------
+#   ДОПОМІЖНІ ФУНКЦІЇ
+# --------------------------------------------------------------
+
+def build_decreasing_layers(input_dim: int,
+                            n_hidden: int,
+                            output_dim: int,
+                            start_width: int,
+                            min_width: int | None = None) -> list[int]:
     """
-    Навчає одну архітектуру MLP та повертає словник з метриками.
-    Використовується тільки для мультикласової класифікації (softmax).
+    Створює список розмірів шарів:
+    [input_dim, h1, h2, ..., hL, output_dim],
+    де кількість нейронів у прихованих шарах монотонно НЕ зростає
+    і плавно спадає від start_width до min_width.
     """
-    print(f"\n[ARCH] Training architecture: {layers}")
+    if min_width is None:
+        min_width = max(2, output_dim)
 
-    net = Network(layers, seed=seed, final_activation="softmax")
+    start_width = max(start_width, min_width)
 
-    # рахуємо кількість параметрів
-    num_params = 0
-    L = len(layers) - 1
-    for l in range(1, L + 1):
-        W = net.params[f"W{l}"]
-        b = net.params[f"b{l}"]
-        num_params += W.size + b.size
+    if n_hidden <= 0:
+        raise ValueError("n_hidden має бути > 0")
 
-    t0 = time.time()
-    hist = net.fit(
-        Xtr, Ytr,
-        Xva, Yva,
-        max_epochs=max_epochs,
-        batch_size=128,
-        lr=1e-3,
-        patience=10,
-        monitor="val_macroF1",
-        mode="max",
-        optimizer="adam",
-        task_hint="multiclass",
-        verbose_every=0,
-        metrics_module=M
-    )
-    train_time = time.time() - t0
+    # Якщо шар один — просто start_width
+    if n_hidden == 1:
+        widths = [start_width]
+    else:
+        widths = []
+        for i in range(n_hidden):
+            alpha = i / (n_hidden - 1)  # від 0 до 1
+            # Лінійна інтерполяція між start_width та min_width
+            w_float = (1.0 - alpha) * start_width + alpha * min_width
+            w = int(round(w_float))
 
-    # фінальні метрики на валідації
-    Yhat_va = net.predict(Xva)
-    acc = M.acc_argmax(Yva, Yhat_va)
-    macro_f1 = M.macro_f1(Yva, Yhat_va)
-    top3 = M.top_k_acc(Yva, Yhat_va, k=3)
-    val_loss = hist["val_mse"][-1] if len(hist["val_mse"]) > 0 else np.nan
-    epochs = int(hist["epoch"][-1]) if len(hist["epoch"]) > 0 else np.nan
+            # Гарантуємо, що ширина не зростає
+            if widths and w > widths[-1]:
+                w = widths[-1]
 
-    res = {
-        "layers_str": str(layers),
-        "input_dim": layers[0],
-        "output_dim": layers[-1],
-        "hidden_layers": len(layers) - 2,   # без вхідного та вихідного
-        "total_layers": len(layers) - 1,    # кількість шарів з вагами
-        "num_params": int(num_params),
-        "epochs": epochs,
-        "train_time_sec": float(train_time),
-        "val_loss": float(val_loss),
-        "val_acc": float(acc),
-        "val_macroF1": float(macro_f1),
-        "val_top3": float(top3),
-    }
-    print(f"[ARCH] done: macroF1={macro_f1:.4f}, acc={acc:.4f}, top3={top3:.4f}")
-    return res
+            widths.append(w)
+
+        # Гарантуємо, що останній прихований шар не менший за min_width
+        widths[-1] = max(widths[-1], min_width)
+
+    return [input_dim] + widths + [output_dim]
 
 
-def make_deep_layers(input_dim: int, first_hidden: int, class_dim: int):
+def accuracy_from_outputs(y_true, y_pred):
     """
-    Формує "глибоку" архітектуру:
-    [input_dim, first_hidden, first_hidden-1, ..., class_dim]
-
-    Приклад: first_hidden = 10, class_dim = 8 ->
-      [input_dim, 10, 9, 8]
+    Обчислює accuracy:
+    - якщо вихід один (бінарна) → threshold 0.5
+    - якщо виходів декілька (мультикласова) → argmax
     """
-    hidden = list(range(first_hidden, class_dim, -1))  # 10,9,...,class_dim+1
-    hidden.append(class_dim)  # останній прихований = class_dim
-    return [input_dim] + hidden   # останній елемент = вихідний шар
+    y_true = np.asarray(y_true)
+
+    if y_true.ndim == 1 or y_true.shape[1] == 1:
+        # Бінарна: y_true в 0/1, y_pred – ймовірності (0..1)
+        y_true_bin = y_true.reshape(-1).astype(int)
+        y_prob = np.asarray(y_pred).reshape(-1)
+        y_pred_bin = (y_prob >= 0.5).astype(int)
+        return float(np.mean(y_true_bin == y_pred_bin))
+
+    # Мультикласова: y_true – one-hot (0/1), y_pred – ймовірності (softmax)
+    y_true_labels = np.argmax(y_true, axis=1)
+    y_pred_labels = np.argmax(y_pred, axis=1)
+    return float(np.mean(y_true_labels == y_pred_labels))
 
 
-def plot_group_metrics(df: pd.DataFrame, title_prefix: str, fname: str):
+def run_group(task_name: str,
+              X_train: np.ndarray,
+              Y_train: np.ndarray,
+              X_val: np.ndarray,
+              Y_val: np.ndarray,
+              group_name: str,
+              hidden_layers_list: list[int],
+              start_width: int,
+              max_epochs: int = 50,
+              batch_size: int = 128,
+              lr: float = 1e-3) -> list[dict]:
     """
-    Малює один графік для групи архітектур:
-      по осі X – кількість прихованих шарів,
-      по осі Y – три метрики: acc, macroF1, top3.
+    Проганяє групу архітектур (compact / deep) для однієї задачі
+    і повертає список словників з результатами.
     """
-    plt.figure(figsize=(8, 4))
-    x = df["hidden_layers"].values
-    plt.plot(x, df["val_acc"], marker="o", label="val_acc")
-    plt.plot(x, df["val_macroF1"], marker="o", label="val_macroF1")
-    plt.plot(x, df["val_top3"], marker="o", label="val_top3")
-    plt.xlabel("Кількість прихованих шарів")
-    plt.ylabel("Значення метрики")
-    plt.title(f"{title_prefix}: метрики vs кількість прихованих шарів")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(fname, dpi=150)
-    plt.close()
-    print(f"[plot] Saved {fname}")
+
+    input_dim = X_train.shape[1]
+    # Якщо Y має форму (N,) → бінарна; якщо (N, C) → C класів
+    if Y_train.ndim == 1:
+        output_dim = 1
+    else:
+        output_dim = Y_train.shape[1]
+
+    results = []
+
+    for n_hidden in hidden_layers_list:
+        layers = build_decreasing_layers(
+            input_dim=input_dim,
+            n_hidden=n_hidden,
+            output_dim=output_dim,
+            start_width=start_width
+        )
+
+        print(
+            f"[{task_name}] group={group_name}, hidden_layers={n_hidden}, "
+            f"layers={layers}"
+        )
+
+        net = Network(layers)
+
+        t0 = time.time()
+        hist = net.fit(
+            X_train, Y_train,
+            X_val,   Y_val,
+            max_epochs=max_epochs,
+            batch_size=batch_size,
+            lr=lr,
+            loss="auto",          # нехай Network сам вибере BCE/CE + активації
+            patience=10,
+            verbose_every=max(1, max_epochs // 5),
+            reduce_lr_on_plateau=0.5
+        )
+        dt = time.time() - t0
+
+        # Прогноз на валідації
+        Yhat_val = net.predict(X_val)
+
+        acc_val = accuracy_from_outputs(Y_val, Yhat_val)
+
+        result = {
+            "task": task_name,
+            "group": group_name,
+            "n_hidden": n_hidden,
+            "layers": layers,
+            "val_accuracy": acc_val,
+            "final_train_loss": hist["train_loss"][-1],
+            "final_val_loss": hist["val_loss"][-1],
+            "best_epoch": int(hist["epoch"][np.argmin(hist["val_loss"])]),
+            "time_sec": dt,
+        }
+        results.append(result)
+
+        print(
+            f"  → val_acc={acc_val:.4f}, "
+            f"best_epoch={result['best_epoch']}, "
+            f"time={dt:.1f}s"
+        )
+
+    return results
 
 
-# ======================================================================
-# Головна функція архітектурного пошуку
-# ======================================================================
+# --------------------------------------------------------------
+#   ГОЛОВНА ФУНКЦІЯ ПОШУКУ АРХІТЕКТУР
+# --------------------------------------------------------------
 
-def arch_search(csv_path: str):
-    # -------------------------------------------------------------
-    # 1. Завантаження та підготовка даних
-    # -------------------------------------------------------------
-    print("\n=== DATA PREPARATION FOR ARCH SEARCH ===")
+def main():
+    # Шлях до CSV з логами (як і раніше)
+    csv_path = os.environ.get("CSV_PATH", "Train_Test_Windows_10.csv")
 
-    Xtr, Xva, Ytr_pm1, Yva_pm1, meta = create_dataset(
-        csv_path,
+    # Створюємо датасет через data_utils.create_dataset
+    # Тут використовуємо z-score нормалізацію, як ми налаштували.
+    X_train, X_val, y_type_train_pm1, y_type_val_pm1, meta = create_dataset(
+        csv_path=csv_path,
         test_size=0.2,
         random_state=42,
         scaling="zscore",
         return_meta=True
     )
 
-    classes = meta["classes"]
-    print(f"[info] Train/Val shapes: {Xtr.shape}, {Xva.shape}")
-    print(f"[info] Classes: {classes}")
+    # ----------------- МУЛЬТИКЛАСОВА КЛАСИФІКАЦІЯ -----------------
+    # y_type_* з create_dataset йдуть у форматі {-1, +1} (one-vs-rest),
+    # переводимо в стандартний one-hot 0/1:
+    Ymc_train = (y_type_train_pm1 + 1.0) / 2.0
+    Ymc_val   = (y_type_val_pm1   + 1.0) / 2.0
 
-    # Переводимо мітки з {-1,+1} у {0,1} для softmax + cross-entropy
-    Ytr = (Ytr_pm1 + 1.0) / 2.0
-    Yva = (Yva_pm1 + 1.0) / 2.0
+    results_all = []
 
-    input_dim = Xtr.shape[1]
-    class_dim = Ytr.shape[1]
+    print("\n================= MULTICLASS ARCH SEARCH =================")
+    res_compact_mc = run_group(
+        task_name="multiclass",
+        X_train=X_train,
+        Y_train=Ymc_train,
+        X_val=X_val,
+        Y_val=Ymc_val,
+        group_name="compact",
+        hidden_layers_list=COMPACT_HIDDEN_LAYERS,
+        start_width=COMPACT_START_WIDTH,
+        max_epochs=50
+    )
+    res_deep_mc = run_group(
+        task_name="multiclass",
+        X_train=X_train,
+        Y_train=Ymc_train,
+        X_val=X_val,
+        Y_val=Ymc_val,
+        group_name="deep",
+        hidden_layers_list=DEEP_HIDDEN_LAYERS,
+        start_width=DEEP_START_WIDTH,
+        max_epochs=50
+    )
+    results_all.extend(res_compact_mc)
+    results_all.extend(res_deep_mc)
 
-    # -------------------------------------------------------------
-    # 2. Компактні архітектури
-    # -------------------------------------------------------------
-    print("\n=== COMPACT ARCHITECTURES ===")
+    # ----------------- БІНАРНА КЛАСИФІКАЦІЯ -----------------
+    y_label_train_pm1 = meta.get("y_label_train", None)
+    y_label_val_pm1   = meta.get("y_label_val", None)
 
-    compact_archs = [
-        [input_dim, 64, class_dim],                        # 1 прихований
-        [input_dim, 128, 64, class_dim],                   # 2 прихованих
-        [input_dim, 256, 128, 64, class_dim],              # 3 прихованих
-        [input_dim, 512, 256, 128, 64, class_dim],         # 4 прихованих
-        [input_dim, 512, 256, class_dim],                  # 2 прихованих, але ширших
-    ]
+    if y_label_train_pm1 is not None:
+        print("\n================= BINARY ARCH SEARCH =================")
+        # Переводимо {-1, +1} → {0, 1}
+        Ybin_train = (y_label_train_pm1 + 1.0) / 2.0
+        Ybin_val   = (y_label_val_pm1   + 1.0) / 2.0
 
-    compact_results = []
-    for arch in compact_archs:
-        res = run_architecture(arch, Xtr, Ytr, Xva, Yva, max_epochs=300, seed=123)
-        compact_results.append(res)
+        res_compact_bin = run_group(
+            task_name="binary",
+            X_train=X_train,
+            Y_train=Ybin_train,
+            X_val=X_val,
+            Y_val=Ybin_val,
+            group_name="compact",
+            hidden_layers_list=COMPACT_HIDDEN_LAYERS,
+            start_width=COMPACT_START_WIDTH,
+            max_epochs=50
+        )
+        res_deep_bin = run_group(
+            task_name="binary",
+            X_train=X_train,
+            Y_train=Ybin_train,
+            X_val=X_val,
+            Y_val=Ybin_val,
+            group_name="deep",
+            hidden_layers_list=DEEP_HIDDEN_LAYERS,
+            start_width=DEEP_START_WIDTH,
+            max_epochs=50
+        )
+        results_all.extend(res_compact_bin)
+        results_all.extend(res_deep_bin)
 
-    df_compact = pd.DataFrame(compact_results)
-    df_compact.to_csv("compact_results.csv", index=False)
-    print("[save] compact_results.csv saved")
+    # ----------------------------------------------------------
+    # ЗБЕРІГАЄМО РЕЗУЛЬТАТИ ТА МАЛЮЄМО ГРАФІКИ
+    # ----------------------------------------------------------
 
-    plot_group_metrics(df_compact, "Компактні мережі", "compact_metrics_vs_layers.png")
+    df = pd.DataFrame(results_all)
+    df.to_csv("arch_search_results.csv", index=False)
+    print("\nРезультати збережено в arch_search_results.csv")
 
-    # -------------------------------------------------------------
-    # 3. Глибокі архітектури
-    # -------------------------------------------------------------
-    print("\n=== DEEP ARCHITECTURES ===")
+    # Графіки: val_accuracy від кількості прихованих шарів для кожної задачі
+    for task in df["task"].unique():
+        plt.figure()
+        for group in ["compact", "deep"]:
+            sub = df[(df["task"] == task) & (df["group"] == group)]
+            if sub.empty:
+                continue
+            sub_sorted = sub.sort_values("n_hidden")
+            plt.plot(
+                sub_sorted["n_hidden"].to_numpy(),
+                sub_sorted["val_accuracy"].to_numpy(),
+                marker="o",
+                label=f"{group}"
+            )
 
-    # варіанти first_hidden: 10, 50, 100, 200, 500, 1000
-    deep_first = [10, 50, 100, 200, 500, 1000]
-    deep_results = []
+        plt.xlabel("Кількість прихованих шарів")
+        plt.ylabel("Accuracy на валідації")
+        plt.title(f"Залежність якості від глибини ({task})")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"arch_search_{task}.png")
 
-    for n_first in deep_first:
-        arch = make_deep_layers(input_dim, n_first, class_dim)
-        res = run_architecture(arch, Xtr, Ytr, Xva, Yva, max_epochs=300, seed=123)
-        res["first_hidden_size"] = n_first
-        deep_results.append(res)
+    print("Графіки збережено як arch_search_multiclass.png та arch_search_binary.png (якщо був label).")
 
-    df_deep = pd.DataFrame(deep_results)
-    df_deep.to_csv("deep_results.csv", index=False)
-    print("[save] deep_results.csv saved")
-
-    plot_group_metrics(df_deep, "Глибокі мережі", "deep_metrics_vs_layers.png")
-
-    print("\n=== ARCHITECTURE SEARCH FINISHED ===")
-    print("Files saved:")
-    print("  compact_results.csv, compact_metrics_vs_layers.png")
-    print("  deep_results.csv, deep_metrics_vs_layers.png")
-
-
-# ======================================================================
-# Точка входу
-# ======================================================================
 
 if __name__ == "__main__":
-    csv_path = os.environ.get("CSV_PATH", "Train_Test_Windows_10.csv")
-    arch_search(csv_path)
+    main()
