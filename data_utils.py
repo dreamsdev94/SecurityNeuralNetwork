@@ -1,180 +1,107 @@
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.utils import shuffle
-from sklearn.preprocessing import StandardScaler
+import pandas as pd
 
 
-# -------------------------------------------------------------------
-#  ЗАГАЛЬНІ УТИЛІТИ ДЛЯ РОБОТИ З ДАНИМИ
-# -------------------------------------------------------------------
+def normalize_zscore(X_train, X_val):
+    mean = X_train.mean(axis=0, keepdims=True)
+    std = X_train.std(axis=0, keepdims=True)
+    std = np.where(std < 1e-12, 1.0, std)
+    return (X_train - mean) / std, (X_val - mean) / std
 
-def train_val_test_split(X, Y, val_size=0.2, test_size=0.2, random_state=42, stratify=True):
-    """
-    Розбиває дані на train/val/test.
-    Якщо stratify=True, то стратифікуємо за мітками Y (за першою компонентою).
-    """
-    X = np.asarray(X, dtype=np.float32)
-    Y = np.asarray(Y, dtype=np.float32)
 
-    if stratify:
-        # Стратифікація за першою компонентою
-        y_strat = np.argmax(Y, axis=1) if Y.ndim == 2 and Y.shape[1] > 1 else (Y > 0).astype(int)
+def oversample_minority(X, y):
+    unique, counts = np.unique(y, return_counts=True)
+    max_count = np.max(counts)
+
+    out_X, out_y = [], []
+    for cls, cnt in zip(unique, counts):
+        idx = np.where(y == cls)[0]
+        reps = int(np.ceil(max_count / cnt))
+        new_idx = np.tile(idx, reps)[:max_count]
+        out_X.append(X[new_idx])
+        out_y.append(np.full(max_count, cls))
+
+    return np.vstack(out_X), np.concatenate(out_y)
+
+
+def create_dataset(csv_path, test_size=0.2, random_state=42,
+                   scaling="zscore", return_meta=False):
+
+    print(f"[LOAD] CSV → {csv_path}")
+    df = pd.read_csv(csv_path)
+    print(f"[SHAPE] initial: {df.shape}")
+
+    col_type = "Type" if "Type" in df.columns else "type"
+    df[col_type] = df[col_type].astype("category")
+
+    class_names = list(df[col_type].cat.categories)
+    y_idx = df[col_type].cat.codes.to_numpy()
+
+    if "Label" in df.columns or "label" in df.columns:
+        col_label = "Label" if "Label" in df.columns else "label"
+        y_bin = df[col_label].astype(np.float32).to_numpy()
+        y_bin = np.where(y_bin == 1, 1.0, -1.0)
     else:
-        y_strat = None
+        y_bin = None
 
-    X_tr, X_tmp, Y_tr, Y_tmp = train_test_split(
-        X, Y, test_size=(val_size + test_size), random_state=random_state, stratify=y_strat
-    )
+    feature_cols = [c for c in df.columns if c not in ["Type", "type", "Label", "label"]]
+    X = df[feature_cols].apply(pd.to_numeric, errors="coerce")
 
-    if stratify:
-        y_tmp = np.argmax(Y_tmp, axis=1) if Y_tmp.ndim == 2 and Y_tmp.shape[1] > 1 else (Y_tmp > 0).astype(int)
+    nan_frac = X.isna().mean(axis=1)
+    X = X.loc[nan_frac < 0.3].copy()
+    X = X.fillna(X.mean())
+
+    nunique = X.nunique()
+    const_cols = nunique[nunique <= 1].index.tolist()
+    if len(const_cols):
+        print(f"[CLEAN] remove constant cols: {len(const_cols)}")
+        X = X.drop(columns=const_cols)
+
+    X = X.drop_duplicates()
+
+    y_idx = y_idx[:len(X)]
+    if y_bin is not None:
+        y_bin = y_bin[:len(X)]
+
+    X = X.to_numpy(np.float32)
+
+    rng = np.random.default_rng(random_state)
+    idx = rng.permutation(len(X))
+    split = int((1 - test_size) * len(idx))
+
+    tr, va = idx[:split], idx[split:]
+
+    Xtr, Xva = X[tr], X[va]
+    ytr_idx, yva_idx = y_idx[tr], y_idx[va]
+
+    if y_bin is not None:
+        ytr_bin, yva_bin = y_bin[tr], y_bin[va]
     else:
-        y_tmp = None
-
-    rel_test = test_size / (val_size + test_size)
-
-    X_va, X_te, Y_va, Y_te = train_test_split(
-        X_tmp, Y_tmp, test_size=rel_test, random_state=random_state, stratify=y_tmp
-    )
-
-    return X_tr, Y_tr, X_va, Y_va, X_te, Y_te
-
-
-# -------------------------------------------------------------------
-#  НОРМАЛІЗАЦІЯ ОЗНАК
-# -------------------------------------------------------------------
-
-def zscore_scale(X_tr, X_va=None, X_te=None):
-    """
-    Z-score нормалізація:
-    x' = (x - mean) / std
-    mean, std обчислюються лише за train.
-    """
-    scaler = StandardScaler()
-    X_tr_n = scaler.fit_transform(X_tr)
-
-    if X_va is not None:
-        X_va_n = scaler.transform(X_va)
-    else:
-        X_va_n = None
-
-    if X_te is not None:
-        X_te_n = scaler.transform(X_te)
-    else:
-        X_te_n = None
-
-    return X_tr_n, X_va_n, X_te_n, scaler
-
-
-def minmax_0_1_scale(X_tr, X_va=None, X_te=None):
-    """
-    Нормалізація в [0, 1] (якщо раптом знадобиться):
-    x' = (x - min) / (max - min)
-    """
-    X_tr = np.asarray(X_tr, dtype=np.float32)
-    xmin = X_tr.min(axis=0)
-    xmax = X_tr.max(axis=0)
-    denom = np.where((xmax - xmin) == 0, 1.0, (xmax - xmin))
-
-    def _scale(X):
-        if X is None:
-            return None
-        X = np.asarray(X, dtype=np.float32)
-        return (X - xmin) / denom
-
-    return _scale(X_tr), _scale(X_va), _scale(X_te), (xmin, xmax)
-
-
-# -------------------------------------------------------------------
-#  СТВОРЕННЯ НАБОРУ ДАНИХ
-# -------------------------------------------------------------------
-
-def create_dataset(
-        X,
-        Y,
-        val_size=0.2,
-        test_size=0.2,
-        scaling="zscore",
-        random_state=42,
-        stratify=True
-):
-    """
-    Повертає:
-    Xtr, Ytr, Xva, Yva, Xte, Yte, info_dict
-
-    scaling:
-        "zscore"  – стандартна z-score нормалізація (рекомендовано)
-        "0-1"     – нормалізація в [0, 1]
-        None      – без масштабування
-    """
-    X = np.asarray(X, dtype=np.float32)
-    Y = np.asarray(Y, dtype=np.float32)
-
-    Xtr, Ytr, Xva, Yva, Xte, Yte = train_val_test_split(
-        X, Y,
-        val_size=val_size,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify
-    )
-
-    scale_info = None
+        ytr_bin = yva_bin = None
 
     if scaling == "zscore":
-        Xtr_n, Xva_n, Xte_n, scaler = zscore_scale(Xtr, Xva, Xte)
-        Xtr, Xva, Xte = Xtr_n, Xva_n, Xte_n
-        scale_info = ("zscore", scaler)
-
-    elif scaling == "0-1":
-        Xtr_n, Xva_n, Xte_n, mm = minmax_0_1_scale(Xtr, Xva, Xte)
-        Xtr, Xva, Xte = Xtr_n, Xva_n, Xte_n
-        scale_info = ("0-1", mm)
-
-    elif scaling is None:
-        scale_info = None
-
+        Xtr, Xva = normalize_zscore(Xtr, Xva)
     else:
-        raise ValueError(f"Unknown scaling mode: {scaling}")
+        raise ValueError("only zscore allowed")
 
-    info = {
-        "val_size": val_size,
-        "test_size": test_size,
-        "scaling": scaling,
-        "scale_info": scale_info,
-        "random_state": random_state,
-        "stratify": stratify
+    n_classes = len(class_names)
+    ytr_oh = -np.ones((len(ytr_idx), n_classes), np.float32)
+    yva_oh = -np.ones((len(yva_idx), n_classes), np.float32)
+
+    ytr_oh[np.arange(len(ytr_idx)), ytr_idx] = 1.0
+    yva_oh[np.arange(len(yva_idx)), yva_idx] = 1.0
+
+    if ytr_bin is not None:
+        Xtr, ytr_bin = oversample_minority(Xtr, ytr_bin)
+
+    meta = {
+        "feature_names": feature_cols,
+        "class_names": class_names,
+        "y_bin_train": ytr_bin,
+        "y_bin_val": yva_bin
     }
 
-    return Xtr, Ytr, Xva, Yva, Xte, Yte, info
-
-
-# -------------------------------------------------------------------
-#  ГЕНЕРАЦІЯ СИНТЕТИЧНИХ ДАНИХ (ПРИКЛАД)
-# -------------------------------------------------------------------
-
-def make_synthetic_binary(n_samples=10000, n_features=113, random_state=42):
-    """
-    Простий приклад генерації бінарного датасету {-1, +1}.
-    """
-    rng = np.random.default_rng(random_state)
-    X = rng.normal(size=(n_samples, n_features)).astype(np.float32)
-    w_true = rng.normal(size=(n_features,)).astype(np.float32)
-    scores = X @ w_true
-    y = np.where(scores > 0, 1.0, -1.0).astype(np.float32)
-    return X, y.reshape(-1, 1)
-
-
-def make_synthetic_multiclass(n_samples=10000, n_features=113, n_classes=10, random_state=42):
-    """
-    Приклад генерації мультикласового датасету з мітками у {-1,+1} (one-vs-all).
-    """
-    rng = np.random.default_rng(random_state)
-    X = rng.normal(size=(n_samples, n_features)).astype(np.float32)
-
-    W_true = rng.normal(size=(n_features, n_classes)).astype(np.float32)
-    scores = X @ W_true
-
-    labels = np.argmax(scores, axis=1)
-    Y = -np.ones((n_samples, n_classes), dtype=np.float32)
-    Y[np.arange(n_samples), labels] = 1.0
-    return X, Y
+    if return_meta:
+        return Xtr, Xva, ytr_oh, yva_oh, meta
+    else:
+        return Xtr, Xva, ytr_oh, yva_oh

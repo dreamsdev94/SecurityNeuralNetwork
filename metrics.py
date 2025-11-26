@@ -1,6 +1,16 @@
 import numpy as np
 
 
+def accuracy(yhat, ytrue):
+    if yhat.ndim > 1:
+        preds = np.argmax(yhat, axis=1)
+        true = np.argmax(ytrue, axis=1)
+        return float(np.mean(preds == true))
+    else:
+        preds = (yhat >= 0).astype(int)
+        true = (ytrue >= 0).astype(int)
+        return float(np.mean(preds == true))
+
 def _as_1d(a):
     a = np.asarray(a)
     return a.reshape(-1)

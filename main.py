@@ -1,68 +1,30 @@
-import numpy as np
-from data_utils import auto_normalize
+from data_utils import create_dataset
 from network import Network
 from metrics import accuracy
 
-###############################################################################
-# Основний запуск навчання
-###############################################################################
 
-def train_model(layers, Xtr, Ytr, Xva, Yva,
-                epochs=200, batch_size=128, lr=1e-3, loss="auto"):
+def main():
 
-    # тип задачі
-    n_out = layers[-1]
-    task_type = "binary" if n_out == 1 else "multiclass"
+    Xtr, Xva, Ytr, Yva, meta = create_dataset(
+        "Train_Test_Windows_10.csv",
+        scaling="zscore",
+        return_meta=True
+    )
 
-    # авто-режим
-    if loss == "auto":
-
-        if task_type == "binary":
-            hidden_act = "sigmoid"
-            output_act = "sigmoid"
-            loss = "bce"
-
-        else:
-            hidden_act = "tanh"
-            output_act = "softmax"
-            loss = "ce"
-    else:
-        hidden_act = "tanh"
-        output_act = "tanh"
-
-    # глибокі мережі
-    n_hidden = len(layers) - 2
-    if n_hidden > 7:
-        hidden_act = "relu"
-
-    # ---- нормалізація ----
-    Xtr_norm = auto_normalize(Xtr, task_type, hidden_act)
-    Xva_norm = auto_normalize(Xva, task_type, hidden_act)
-
-    # ---- запуск ----
+    layers = [Xtr.shape[1], 64, 32, 8]
     net = Network(layers)
 
     hist = net.fit(
-        Xtr_norm, Ytr,
-        Xva_norm, Yva,
-        hidden_activation=hidden_act,
-        output_activation=output_act,
-        loss=loss,
-        lr=lr,
-        batch_size=batch_size,
-        max_epochs=epochs,
-        patience=15,
-        reduce_lr_on_plateau=0.5,
-        verbose_every=epochs // 10
+        Xtr, Ytr, Xva, Yva,
+        loss="auto",
+        max_epochs=80
     )
 
-    # ---- оцінка ----
-    yhat_va = net.predict(
-        Xva_norm,
-        hidden_activation=hidden_act,
-        output_activation=output_act
-    )
+    yhat = net.predict(Xva)
+    acc = accuracy(yhat, Yva)
 
-    score = accuracy(yhat_va, Yva)
+    print(f"\nAccuracy = {acc:.4f}")
 
-    return net, hist, score
+
+if __name__ == "__main__":
+    main()
