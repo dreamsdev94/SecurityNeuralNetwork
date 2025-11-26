@@ -2,111 +2,149 @@ import numpy as np
 
 
 def accuracy(yhat, ytrue):
-    if yhat.ndim > 1:
+    """
+    Загальна точність класифікації.
+
+    Випадки:
+    1) Мультиклас: матриці форми (N, C) – argmax по стовпцях.
+    2) Бінарний: вектори або матриці (N,1).
+       - якщо ytrue у {0,1} → порівнюємо напряму з порогом 0.5 для yhat;
+       - інакше вважаємо, що це {-1,+1} і порівнюємо за знаком.
+    """
+    yhat = np.asarray(yhat)
+    ytrue = np.asarray(ytrue)
+
+    if yhat.ndim == 1:
+        yhat = yhat.reshape(-1, 1)
+    if ytrue.ndim == 1:
+        ytrue = ytrue.reshape(-1, 1)
+
+    # Мультиклас
+    if yhat.shape[1] > 1 or ytrue.shape[1] > 1:
         preds = np.argmax(yhat, axis=1)
         true = np.argmax(ytrue, axis=1)
         return float(np.mean(preds == true))
+
+    # Бінарний випадок
+    preds = (yhat >= 0.5).astype(int).ravel()
+
+    true_flat = ytrue.ravel()
+    uniques = np.unique(true_flat)
+
+    if np.all(np.isin(uniques, [0, 1])):
+        true = true_flat.astype(int)
     else:
-        preds = (yhat >= 0).astype(int)
-        true = (ytrue >= 0).astype(int)
-        return float(np.mean(preds == true))
+        # припускаємо {-1,+1}
+        true = (true_flat >= 0).astype(int)
+
+    return float(np.mean(preds == true))
+
 
 def _as_1d(a):
     a = np.asarray(a)
     return a.reshape(-1)
 
 
-# ---------- Бінарні метрики (мітки у {-1, +1}) ----------
-
-def acc_sign(y_true, y_pred):
+def acc_sign(yhat_pm1, ytrue_pm1):
     """
-    Accuracy за знаком виходу.
-    y_true: {-1,+1}, y_pred: довільні дійсні.
+    Точність для бінарного випадку з мітками в {-1,+1}
+    (порівнюємо знак).
     """
-    yt = np.sign(_as_1d(y_true))
-    yp = np.sign(_as_1d(y_pred))
-    yp[yp == 0] = 1
-    return float(np.mean(yt == yp))
+    yh = np.sign(_as_1d(yhat_pm1))
+    yt = np.sign(_as_1d(ytrue_pm1))
+    return float(np.mean(yh == yt))
 
 
-def bin_f1_sign(y_true, y_pred):
+def bin_f1_sign(yhat_pm1, ytrue_pm1):
     """
-    F1-міра для бінарної класифікації за знаком.
-    Позитивний клас = +1, негативний = -1.
+    F1-score для бінарного випадку з мітками в {-1,+1}.
+    Повертає (precision, recall, f1).
     """
-    yt = np.sign(_as_1d(y_true))
-    yp = np.sign(_as_1d(y_pred))
-    yp[yp == 0] = 1
+    yh = np.sign(_as_1d(yhat_pm1))
+    yt = np.sign(_as_1d(ytrue_pm1))
 
-    tp = np.sum((yt == 1) & (yp == 1))
-    fp = np.sum((yt == -1) & (yp == 1))
-    fn = np.sum((yt == 1) & (yp == -1))
+    tp = np.sum((yh == 1) & (yt == 1))
+    fp = np.sum((yh == 1) & (yt == -1))
+    fn = np.sum((yh == -1) & (yt == 1))
 
-    precision = tp / (tp + fp + 1e-12)
-    recall = tp / (tp + fn + 1e-12)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
 
-    f1 = 2 * precision * recall / (precision + recall + 1e-12)
-    return float(f1)
+    return float(precision), float(recall), float(f1)
 
-
-# ---------- Мультикласові метрики (мітки у {-1, +1} в one-vs-all) ----------
 
 def argmax_classes(Y_pm1):
     """
-    Перетворює матрицю у {-1,+1} (або довільні дійсні) в індекс класу за argmax.
+    Перетворює матрицю у {−1,+1} або в one-hot з будь-якими значеннями
+    у прогноз класу через argmax по осі 1.
     """
-    Y_pm1 = np.asarray(Y_pm1)
-    return np.argmax(Y_pm1, axis=1)
+    Y = np.asarray(Y_pm1)
+    if Y.ndim == 1:
+        return np.zeros_like(Y, dtype=int)
+    return np.argmax(Y, axis=1)
 
 
-def accuracy_mc(Y_true_pm1, Y_pred_pm1):
+def accuracy_mc(Y_pred_pm1, Y_true_pm1):
     """
-    Accuracy для мультикласового випадку.
-    Y_true_pm1, Y_pred_pm1 – матриці форми (N, C) з оцінками класів.
+    Точність мультикласової класифікації (через argmax).
     """
     t = argmax_classes(Y_true_pm1)
     p = argmax_classes(Y_pred_pm1)
     return float(np.mean(t == p))
 
 
-def macro_f1_mc(Y_true_pm1, Y_pred_pm1):
+def macro_f1_mc(Y_pred_pm1, Y_true_pm1):
     """
-    Macro-F1 для мультикласу.
+    Macro-F1 для мультикласової класифікації.
     """
     t = argmax_classes(Y_true_pm1)
     p = argmax_classes(Y_pred_pm1)
-
     classes = np.unique(t)
-    f1s = []
+    f1_scores = []
+
     for c in classes:
-        tp = np.sum((t == c) & (p == c))
-        fp = np.sum((t != c) & (p == c))
-        fn = np.sum((t == c) & (p != c))
+        tp = np.sum((p == c) & (t == c))
+        fp = np.sum((p == c) & (t != c))
+        fn = np.sum((p != c) & (t == c))
 
-        prec = tp / (tp + fp + 1e-12)
-        rec = tp / (tp + fn + 1e-12)
-        f1 = 2 * prec * rec / (prec + rec + 1e-12)
-        f1s.append(f1)
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        if prec + rec > 0:
+            f1 = 2 * prec * rec / (prec + rec)
+        else:
+            f1 = 0.0
+        f1_scores.append(f1)
 
-    return float(np.mean(f1s))
+    if len(f1_scores) == 0:
+        return 0.0
+    return float(np.mean(f1_scores))
 
 
-def topk_accuracy_mc(Y_true_pm1, Y_pred_pm1, k=3):
+def topk_accuracy_mc(Y_pred_pm1, Y_true_pm1, k=5):
     """
-    Top-k accuracy (наприклад, k=3).
+    Top-k accuracy для мультикласу.
     """
-    Y_true_pm1 = np.asarray(Y_true_pm1)
-    Y_pred_pm1 = np.asarray(Y_pred_pm1)
+    Y_pred = np.asarray(Y_pred_pm1)
+    Y_true = np.asarray(Y_true_pm1)
 
-    t = argmax_classes(Y_true_pm1)
+    if Y_pred.ndim == 1:
+        Y_pred = Y_pred.reshape(-1, 1)
+    if Y_true.ndim == 1:
+        Y_true = Y_true.reshape(-1, 1)
 
-    topk = np.argsort(-Y_pred_pm1, axis=1)[:, :k]
+    true = np.argmax(Y_true, axis=1)
+    topk = np.argsort(-Y_pred, axis=1)[:, :k]
 
     hits = 0
-    for i in range(len(t)):
-        if t[i] in topk[i]:
+    for i in range(len(true)):
+        if true[i] in topk[i]:
             hits += 1
-    return float(hits / len(t))
+    return float(hits / len(true))
 
 
 def confusion_matrix_mc(Y_true_pm1, Y_pred_pm1):
@@ -115,7 +153,7 @@ def confusion_matrix_mc(Y_true_pm1, Y_pred_pm1):
     """
     t = argmax_classes(Y_true_pm1)
     p = argmax_classes(Y_pred_pm1)
-    C = int(Y_true_pm1.shape[1])
+    C = int(np.max([t.max(), p.max()]) + 1)
     M = np.zeros((C, C), dtype=int)
     for i in range(len(t)):
         M[t[i], p[i]] += 1

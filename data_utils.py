@@ -2,106 +2,167 @@ import numpy as np
 import pandas as pd
 
 
-def normalize_zscore(X_train, X_val):
-    mean = X_train.mean(axis=0, keepdims=True)
-    std = X_train.std(axis=0, keepdims=True)
-    std = np.where(std < 1e-12, 1.0, std)
-    return (X_train - mean) / std, (X_val - mean) / std
+class Dataset:
+    """
+    Універсальна структура датасету:
+    містить тренувальні та валідаційні дані.
+    """
+
+    def __init__(self, X_train, y_train, X_val, y_val, meta=None):
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_val = X_val
+        self.y_val = y_val
+        self.meta = meta or {}
+
+    def __repr__(self):
+        return (
+            f"Dataset(\n"
+            f"  X_train={self.X_train.shape}, "
+            f"y_train={self.y_train.shape},\n"
+            f"  X_val={self.X_val.shape}, "
+            f"y_val={self.y_val.shape},\n"
+            f"  meta={list(self.meta.keys())}\n"
+            f")"
+        )
+
+# ----------------------
+# нормалізації
+# ----------------------
+def normalize_zscore(Xtr, Xva):
+    mean = Xtr.mean(axis=0)
+    std = Xtr.std(axis=0) + 1e-9
+    return (Xtr - mean)/std, (Xva - mean)/std
+
+def normalize_minmax(Xtr, Xva):
+    mi = Xtr.min(axis=0)
+    ma = Xtr.max(axis=0) + 1e-9
+    return (Xtr-mi)/(ma-mi), (Xva-mi)/(ma-mi)
 
 
-def oversample_minority(X, y):
+# ----------------------
+# легкий SMOTE-style oversampling
+# ----------------------
+def oversample_balanced(X, y):
+    X = np.array(X)
+    y = np.array(y)
+
     unique, counts = np.unique(y, return_counts=True)
     max_count = np.max(counts)
 
-    out_X, out_y = [], []
-    for cls, cnt in zip(unique, counts):
+    X_out = []
+    y_out = []
+
+    for cls in unique:
         idx = np.where(y == cls)[0]
-        reps = int(np.ceil(max_count / cnt))
-        new_idx = np.tile(idx, reps)[:max_count]
-        out_X.append(X[new_idx])
-        out_y.append(np.full(max_count, cls))
+        cur = X[idx]
 
-    return np.vstack(out_X), np.concatenate(out_y)
+        if len(idx) == max_count:
+            X_out.append(cur)
+            y_out.append(np.full(max_count, cls))
+            continue
+
+        reps = max_count - len(idx)
+        # SMOTE-style jitter
+        noise = np.random.normal(0, 0.01, size=(reps, X.shape[1]))
+        synth = cur[np.random.randint(0, len(cur), reps)] + noise
+
+        X_out.append(np.vstack([cur, synth]))
+        y_out.append(np.full(max_count, cls))
+
+    return np.vstack(X_out), np.concatenate(y_out)
 
 
-def create_dataset(csv_path, test_size=0.2, random_state=42,
-                   scaling="zscore", return_meta=False):
-
-    print(f"[LOAD] CSV → {csv_path}")
+# ----------------------------------------------------------
+# create_dataset (оновлений)
+# ----------------------------------------------------------
+def create_dataset(
+        csv_path,
+        test_size=0.2,
+        random_state=42,
+        scaling_detector="zscore",
+        scaling_classifier="zscore",
+):
     df = pd.read_csv(csv_path)
-    print(f"[SHAPE] initial: {df.shape}")
 
-    col_type = "Type" if "Type" in df.columns else "type"
-    df[col_type] = df[col_type].astype("category")
+    # labels
+    df["type"] = df["type"].astype("category")
+    y_idx = df["type"].cat.codes.to_numpy()
+    class_names = list(df["type"].cat.categories)
 
-    class_names = list(df[col_type].cat.categories)
-    y_idx = df[col_type].cat.codes.to_numpy()
+    y_bin = df["label"].to_numpy().astype(int)
 
-    if "Label" in df.columns or "label" in df.columns:
-        col_label = "Label" if "Label" in df.columns else "label"
-        y_bin = df[col_label].astype(np.float32).to_numpy()
-        y_bin = np.where(y_bin == 1, 1.0, -1.0)
-    else:
-        y_bin = None
+    # features
+    X = df.drop(columns=["type", "label"])
+    X = X.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float32)
 
-    feature_cols = [c for c in df.columns if c not in ["Type", "type", "Label", "label"]]
-    X = df[feature_cols].apply(pd.to_numeric, errors="coerce")
+    # drop 30% NaN rows
+    good = np.isnan(X).mean(axis=1) <= 0.3
+    X = X[good]; y_idx = y_idx[good]; y_bin = y_bin[good]
 
-    nan_frac = X.isna().mean(axis=1)
-    X = X.loc[nan_frac < 0.3].copy()
-    X = X.fillna(X.mean())
+    # fill NaN
+    col_mean = np.nanmean(X, axis=0)
+    inds = np.where(np.isnan(X))
+    X[inds] = col_mean[inds[1]]
 
-    nunique = X.nunique()
-    const_cols = nunique[nunique <= 1].index.tolist()
-    if len(const_cols):
-        print(f"[CLEAN] remove constant cols: {len(const_cols)}")
-        X = X.drop(columns=const_cols)
+    # remove constant columns
+    uniq = np.apply_along_axis(lambda c: len(np.unique(c)), 0, X)
+    keep_cols = np.where(uniq > 1)[0]
+    X = X[:, keep_cols]
 
-    X = X.drop_duplicates()
-
-    y_idx = y_idx[:len(X)]
-    if y_bin is not None:
-        y_bin = y_bin[:len(X)]
-
-    X = X.to_numpy(np.float32)
-
+    # split
+    N = len(X)
     rng = np.random.default_rng(random_state)
-    idx = rng.permutation(len(X))
-    split = int((1 - test_size) * len(idx))
+    idx = rng.permutation(N)
 
-    tr, va = idx[:split], idx[split:]
+    X = X[idx]
+    y_idx = y_idx[idx]
+    y_bin = y_bin[idx]
 
-    Xtr, Xva = X[tr], X[va]
-    ytr_idx, yva_idx = y_idx[tr], y_idx[va]
+    n_val = int(N*test_size)
 
-    if y_bin is not None:
-        ytr_bin, yva_bin = y_bin[tr], y_bin[va]
+    Xtr = X[:-n_val]
+    Xva = X[-n_val:]
+
+    ytr_bin = y_bin[:-n_val]
+    yva_bin = y_bin[-n_val:]
+
+    ytr_idx = y_idx[:-n_val]
+    yva_idx = y_idx[-n_val:]
+
+    # -------------------- detector normalisation --------------------
+    if scaling_detector == "zscore":
+        Xtr_d, Xva_d = normalize_zscore(Xtr, Xva)
     else:
-        ytr_bin = yva_bin = None
+        Xtr_d, Xva_d = normalize_minmax(Xtr, Xva)
 
-    if scaling == "zscore":
-        Xtr, Xva = normalize_zscore(Xtr, Xva)
+    Xtr_d, ytr_bin_d = oversample_balanced(Xtr_d, ytr_bin)
+
+    # -------------------- classifier normalisation --------------------
+    if scaling_classifier == "zscore":
+        Xtr_c, Xva_c = normalize_zscore(Xtr, Xva)
     else:
-        raise ValueError("only zscore allowed")
+        Xtr_c, Xva_c = normalize_minmax(Xtr, Xva)
 
+    Xtr_c, ytr_idx_bal = oversample_balanced(Xtr_c, ytr_idx)
+
+    # -------------------- one-hot --------------------
     n_classes = len(class_names)
-    ytr_oh = -np.ones((len(ytr_idx), n_classes), np.float32)
-    yva_oh = -np.ones((len(yva_idx), n_classes), np.float32)
+    Ytr = np.eye(n_classes)[ytr_idx_bal]
+    Yva = np.eye(n_classes)[yva_idx]
 
-    ytr_oh[np.arange(len(ytr_idx)), ytr_idx] = 1.0
-    yva_oh[np.arange(len(yva_idx)), yva_idx] = 1.0
+    detector_dataset = Dataset(
+        X_train=Xtr_d,
+        y_train=ytr_bin_d.reshape(-1,1),
+        X_val=Xva_d,
+        y_val=yva_bin.reshape(-1,1)
+    )
 
-    if ytr_bin is not None:
-        Xtr, ytr_bin = oversample_minority(Xtr, ytr_bin)
+    classifier_dataset = Dataset(
+        X_train=Xtr_c,
+        y_train=Ytr,
+        X_val=Xva_c,
+        y_val=Yva
+    )
 
-    meta = {
-        "feature_names": feature_cols,
-        "class_names": class_names,
-        "y_bin_train": ytr_bin,
-        "y_bin_val": yva_bin
-    }
-
-    if return_meta:
-        return Xtr, Xva, ytr_oh, yva_oh, meta
-    else:
-        return Xtr, Xva, ytr_oh, yva_oh
+    return detector_dataset, classifier_dataset

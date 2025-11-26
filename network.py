@@ -1,460 +1,247 @@
-# Імпорт бібліотеки Numpy
 import numpy as np
 
-try:
-    # Спроба імпортувати бібліотеку CuPy
-    import cupy as cp
+# ==========================
+# активації
+# ==========================
+def relu(x): return np.maximum(0, x)
+def relu_deriv(x): return (x > 0).astype(np.float32)
 
-    cupy_available = True
-    try:
-        cp.cuda.runtime.getDevice()
-    except Exception:
-        cupy_available = False
-except Exception:
-    cp = None
-    cupy_available = False
+def sigmoid(x): return 1.0 / (1.0 + np.exp(-x))
+def sigmoid_deriv(a): return a * (1 - a)
 
-# Використовуємо CuPy в разі доступності, інакше - Numpy
-if cupy_available:
-    xp = cp
-else:
-    xp = np
+def tanh(x): return np.tanh(x)
+def tanh_deriv(a): return 1 - a * a
+
+def softmax(x):
+    x = x - np.max(x, axis=1, keepdims=True)
+    ex = np.exp(x)
+    return ex / np.sum(ex, axis=1, keepdims=True)
 
 
-# а - будь який масив, np.float32 - необхідний тип даних
-def to_xp(a, dtype=np.float32):
-    if isinstance(a, xp.ndarray):
-        return a
-    return xp.asarray(a, dtype=dtype)
+# ==========================
+# втрати
+# ==========================
+def bce_loss(y, yhat):
+    eps = 1e-9
+    return -np.mean(y * np.log(yhat + eps) + (1-y) * np.log(1-yhat + eps))
+
+def bce_grad(y, yhat):
+    eps = 1e-9
+    return (yhat - y) / ((yhat*(1-yhat)) + eps)
+
+def ce_loss(y, yhat):
+    eps = 1e-9
+    return -np.mean(np.sum(y*np.log(yhat + eps), axis=1))
+
+def ce_grad(y, yhat):
+    return (yhat - y) / y.shape[0]
+
+def mse_loss(y, yhat):
+    return np.mean((yhat - y)**2)
+
+def mse_grad(y, yhat):
+    return 2*(yhat - y) / y.size
 
 
-def to_numpy(a):
-    if isinstance(a, np.ndarray):
-        return a
-    if hasattr(a, "get"):
-        return a.get()
-    if hasattr(a, "asnumpy"):
-        return a.asnumpy()
-    return np.asarray(a)
-
-
-# ======================================================================
-#                           КЛАС НЕЙРОМЕРЕЖІ
-# ======================================================================
+# ==========================
+# мережа
+# ==========================
 class Network:
 
-    def __init__(self, layers, seed=42):
-        self.layers = list(layers)
-        self.rng = np.random.default_rng(seed)
+    def __init__(self, layers):
+        """
+        layers = [input, h1, h2, ..., output]
+        """
+        self.layers = layers
         self.params = {}
-        self.opt_state = {}
-        self._init_params()
+        self.cache = {}
 
-    # ---------------- Xavier -----------------
-    def _xavier_init(self, fan_in, fan_out):
-        limit = np.sqrt(6.0 / (fan_in + fan_out))
-        W_np = self.rng.uniform(-limit, +limit, size=(fan_out, fan_in)).astype(np.float32)
-        b_np = np.zeros((fan_out,), dtype=np.float32)
-        return to_xp(W_np), to_xp(b_np)
+        for i in range(1, len(layers)):
+            self.params[f"W{i}"] = np.random.randn(layers[i-1], layers[i]) * np.sqrt(2/layers[i-1])
+            self.params[f"b{i}"] = np.zeros((1, layers[i]))
 
-    # --------------- Ініціалізація параметрів ----------------
-    def _init_params(self):
-        self.params = {}
-        L = len(self.layers) - 1
+    # ---------------------------------------------------------------------
+    # forward
+    # ---------------------------------------------------------------------
+    def forward(self, X, hidden_activation, output_activation):
+        A = X
+        self.cache["A0"] = X
 
-        for l in range(1, L + 1):
-            W, b = self._xavier_init(self.layers[l - 1], self.layers[l])
-            self.params[f"W{l}"] = W
-            self.params[f"b{l}"] = b
+        for i in range(1, len(self.layers)):
+            Z = A @ self.params[f"W{i}"] + self.params[f"b{i}"]
+            self.cache[f"Z{i}"] = Z
 
-        self.opt_state = {"m": {}, "v": {}, "t": 0}
-
-    # =====================================================================
-    #                          АКТИВАЦІЇ
-    # =====================================================================
-    @staticmethod
-    def _tanh(x):
-        return xp.tanh(x)
-
-    @staticmethod
-    def _dtanh(y):
-        return 1.0 - y * y
-
-    @staticmethod
-    def _sigmoid(x):
-        return 1 / (1 + xp.exp(-x))
-
-    @staticmethod
-    def _dsigmoid(y):
-        return y * (1 - y)
-
-    @staticmethod
-    def _relu(x):
-        return xp.maximum(0, x)
-
-    @staticmethod
-    def _drelu(x):
-        return (x > 0).astype(xp.float32)
-
-    @staticmethod
-    def _softmax(x):
-        x_shifted = x - xp.max(x, axis=1, keepdims=True)
-        exp_x = xp.exp(x_shifted)
-        return exp_x / xp.sum(exp_x, axis=1, keepdims=True)
-
-    # ======================================================================
-    #                        ПРЯМИЙ ПРОХІД
-    # ======================================================================
-    def forward(self, X, hidden_activation="tanh", output_activation="tanh"):
-        X_xp = to_xp(X)
-
-        A = [X_xp]
-        Z = [None]
-
-        L = len(self.layers) - 1
-
-        for l in range(1, L + 1):
-
-            W = self.params[f"W{l}"]
-            b = self.params[f"b{l}"]
-
-            z = A[-1] @ W.T + b[None, :]
-
-            # приховані шари
-            if l < L:
-                if hidden_activation == "tanh":
-                    a = self._tanh(z)
-                elif hidden_activation == "relu":
-                    a = self._relu(z)
-                elif hidden_activation == "sigmoid":
-                    a = self._sigmoid(z)
-                else:
-                    raise ValueError(f"Unknown activation: {hidden_activation}")
-
-            # вихідний шар
-            else:
-                if output_activation == "tanh":
-                    a = self._tanh(z)
-                elif output_activation == "relu":
-                    a = self._relu(z)
-                elif output_activation == "sigmoid":
-                    a = self._sigmoid(z)
+            if i == len(self.layers)-1:   # output layer
+                if output_activation == "sigmoid":
+                    A = sigmoid(Z)
                 elif output_activation == "softmax":
-                    a = self._softmax(z)
-                else:
-                    raise ValueError(f"Unknown output activation: {output_activation}")
-
-            Z.append(z)
-            A.append(a)
-
-        return A, Z
-
-    # -------------------------------------------------------------------------
-    def predict(self, X, hidden_activation="tanh", output_activation="tanh"):
-        A, _ = self.forward(X, hidden_activation, output_activation)
-        return to_numpy(A[-1])
-
-    # ======================================================================
-    #                           ФУНКЦІЇ ВТРАТ
-    # ======================================================================
-    @staticmethod
-    def mse(Yhat, Y):
-        Yh = to_xp(Yhat)
-        Yt = to_xp(Y)
-        diff = Yh - Yt
-        return float(xp.mean(diff * diff))
-
-    @staticmethod
-    def binary_cross_entropy(yhat, y):
-        yhat = to_xp(yhat)
-        y = to_xp(y)
-        eps = 1e-12
-        yhat = xp.clip(yhat, eps, 1 - eps)
-        return float(-xp.mean(y * xp.log(yhat) + (1 - y) * xp.log(1 - yhat)))
-
-    @staticmethod
-    def cross_entropy(yhat, y):
-        yhat = to_xp(yhat)
-        y = to_xp(y)
-        eps = 1e-12
-        yhat = xp.clip(yhat, eps, 1 - eps)
-        return float(-xp.sum(y * xp.log(yhat)) / y.shape[0])
-
-    # ======================================================================
-    #                         ЗВОРОТНЄ ПОШИРЕННЯ
-    # ======================================================================
-    def backward(self, X, Y, hidden_activation="tanh",
-                 output_activation="tanh", loss="mse"):
-
-        A, Z = self.forward(X, hidden_activation, output_activation)
-
-        Y = to_xp(Y)
-        Yhat = A[-1]
-        N = Y.shape[0]
-
-        # ----- dA від loss -----
-        if loss == "mse":
-            dA = (2.0 / N) * (Yhat - Y)
-
-        elif loss == "bce":
-            dA = (Yhat - Y) / N
-
-        elif loss == "ce":
-            dA = (Yhat - Y) / N
-
-        else:
-            raise ValueError(f"Unknown loss: {loss}")
-
-        grads = {}
-        L = len(self.layers) - 1
-
-        # ---- backward ----
-        for l in reversed(range(1, L + 1)):
-
-            a_prev = A[l - 1]
-
-            # вихідний шар
-            if l == L:
-
-                if (output_activation == "sigmoid" and loss == "bce") or \
-                        (output_activation == "softmax" and loss == "ce"):
-                    dZ = dA
+                    A = softmax(Z)
                 elif output_activation == "tanh":
-                    dZ = dA * self._dtanh(Yhat)
-                elif output_activation == "relu":
-                    dZ = dA * self._drelu(Z[l])
-                elif output_activation == "sigmoid":
-                    dZ = dA * self._dsigmoid(Yhat)
+                    A = tanh(Z)
                 else:
-                    raise NotImplementedError("Unsupported combination")
-
-            # приховані шари
+                    A = Z
             else:
-                if hidden_activation == "tanh":
-                    dZ = dA * self._dtanh(A[l])
-                elif hidden_activation == "relu":
-                    dZ = dA * self._drelu(Z[l])
+                if hidden_activation == "relu":
+                    A = relu(Z)
+                elif hidden_activation == "tanh":
+                    A = tanh(Z)
                 elif hidden_activation == "sigmoid":
-                    dZ = dA * self._dsigmoid(A[l])
+                    A = sigmoid(Z)
+
+            self.cache[f"A{i}"] = A
+
+        return A
+
+    # ---------------------------------------------------------------------
+    # backward
+    # ---------------------------------------------------------------------
+    def backward(self, Y, output, hidden_act, output_act, loss):
+        grads = {}
+        L = len(self.layers)-1
+
+        if loss == "bce":
+            dA = bce_grad(Y, output)
+        elif loss == "ce":
+            dA = ce_grad(Y, output)
+        else:
+            dA = mse_grad(Y, output)
+
+        for i in reversed(range(1, L+1)):
+            A_prev = self.cache[f"A{i-1}"]
+            Z = self.cache[f"Z{i}"]
+
+            if i == L:   # output layer
+                if output_act == "sigmoid":
+                    dZ = dA * sigmoid_deriv(output)
+                elif output_act == "tanh":
+                    dZ = dA * tanh_deriv(output)
+                elif output_act == "softmax":
+                    dZ = dA     # CE + Softmax = simple gradient
                 else:
-                    raise ValueError("Unknown hidden activation")
+                    dZ = dA
+            else:   # hidden
+                A = self.cache[f"A{i}"]
+                if hidden_act == "relu":
+                    dZ = dA * relu_deriv(Z)
+                elif hidden_act == "tanh":
+                    dZ = dA * tanh_deriv(A)
+                elif hidden_act == "sigmoid":
+                    dZ = dA * sigmoid_deriv(A)
 
-            dW = dZ.T @ a_prev
-            db = xp.sum(dZ, axis=0)
+            grads[f"W{i}"] = A_prev.T @ dZ
+            grads[f"b{i}"] = np.sum(dZ, axis=0, keepdims=True)
 
-            grads[f"dW{l}"] = dW.astype(xp.float32)
-            grads[f"db{l}"] = db.astype(xp.float32)
-
-            if l > 1:
-                dA = dZ @ self.params[f"W{l}"]
+            dA = dZ @ self.params[f"W{i}"].T
 
         return grads
 
-    # ======================================================================
-    #                           ОПТИМІЗАТОРИ
-    # ======================================================================
-    def sgd_step(self, grads, lr):
-        L = len(self.layers) - 1
-        for l in range(1, L + 1):
-            self.params[f"W{l}"] -= lr * grads[f"dW{l}"]
-            self.params[f"b{l}"] -= lr * grads[f"db{l}"]
+    # ---------------------------------------------------------------------
+    # update
+    # ---------------------------------------------------------------------
+    def update(self, grads, lr):
+        for i in range(1, len(self.layers)):
+            self.params[f"W{i}"] -= lr * grads[f"W{i}"]
+            self.params[f"b{i}"] -= lr * grads[f"b{i}"]
 
-    def adam_step(self, grads, lr, beta1=0.9, beta2=0.999, eps=1e-8):
-        st = self.opt_state
-        st["t"] += 1
-        t = st["t"]
+    # ---------------------------------------------------------------------
+    # train
+    # ---------------------------------------------------------------------
+    def fit(self,
+            Xtr, Ytr,
+            Xva, Yva,
+            hidden_activation="relu",
+            output_activation="sigmoid",
+            loss="bce",
+            batch_size=128,
+            max_epochs=30,
+            lr=0.001,
+            verbose=True):
 
-        L = len(self.layers) - 1
+        hist = {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+            "train_acc": [],
+            "val_acc": [],
+            "batch_step": [],
+            "batch_loss": [],
+            "batch_acc": [],
+        }
 
-        for l in range(1, L + 1):
-            for k, g in [(f"W{l}", grads[f"dW{l}"]), (f"b{l}", grads[f"db{l}"])]:
+        N = Xtr.shape[0]
+        steps = int(np.ceil(N / batch_size))
+        step_counter = 0
 
-                if k not in st["m"]:
-                    st["m"][k] = xp.zeros_like(self.params[k])
-                    st["v"][k] = xp.zeros_like(self.params[k])
+        for epoch in range(max_epochs):
 
-                st["m"][k] = beta1 * st["m"][k] + (1 - beta1) * g
-                st["v"][k] = beta2 * st["v"][k] + (1 - beta2) * (g * g)
+            idx = np.random.permutation(N)
+            Xtr = Xtr[idx]
+            Ytr = Ytr[idx]
 
-                m_hat = st["m"][k] / (1 - beta1 ** t)
-                v_hat = st["v"][k] / (1 - beta2 ** t)
+            for step in range(steps):
+                Xb = Xtr[step*batch_size:(step+1)*batch_size]
+                Yb = Ytr[step*batch_size:(step+1)*batch_size]
 
-                self.params[k] -= lr * m_hat / (xp.sqrt(v_hat) + eps)
+                out = self.forward(Xb, hidden_activation, output_activation)
 
-    # ======================================================================
-    #                      BATCH ITERATOR
-    # ======================================================================
-    @staticmethod
-    def batch_iter(X, Y, batch_size=128, shuffle=True, rng=None):
-        N = X.shape[0]
-        idx = np.arange(N)
+                # loss
+                if loss == "bce": L = bce_loss(Yb, out)
+                elif loss == "ce": L = ce_loss(Yb, out)
+                else: L = mse_loss(Yb, out)
 
-        if shuffle:
-            rng = np.random.default_rng() if rng is None else rng
-            rng.shuffle(idx)
-
-        for i in range(0, N, batch_size):
-            j = idx[i:i + batch_size]
-            yield X[j], Y[j]
-
-    # ======================================================================
-    #                               FIT
-    # ======================================================================
-    def fit(self, Xtr, Ytr, Xva, Yva,
-            max_epochs=200, batch_size=128, lr=1e-3,
-            hidden_activation="tanh",
-            output_activation="tanh",
-            loss="mse",
-            patience=10, min_delta=0.0,
-            optimizer="adam", beta1=0.9, beta2=0.999, eps=1e-8,
-            reduce_lr_on_plateau=None, lr_patience=None, lr_min=1e-6,
-            verbose_every=1,
-            seed=42, warm_start=False):
-
-        rng = np.random.default_rng(seed)
-        if not warm_start:
-            self._init_params()
-
-        n_out = self.layers[-1]
-        n_hidden = len(self.layers) - 2
-
-        # ------------------------------------------
-        # Авто-режим
-        # ------------------------------------------
-        if loss == "auto":
-
-            if n_out == 1:
-                loss = "bce"
-                hidden_activation = "sigmoid"
-                output_activation = "sigmoid"
-                print("[AUTO] Binary → sigmoid + BCE")
-
-            elif n_out > 1:
-                loss = "ce"
-                hidden_activation = "tanh"
-                output_activation = "softmax"
-                print("[AUTO] Multiclass → tanh + softmax + CE")
-
-        # >7 прихованих шарів → ReLU
-        if n_hidden > 7:
-            hidden_activation = "relu"
-            print("[AUTO] >7 hidden layers → ReLU")
-
-        # -----------------------------------------
-        # Функція втрат
-        # -----------------------------------------
-        def compute_loss(Yhat, Y):
-            if loss == "mse":
-                return self.mse(Yhat, Y)
-            elif loss == "bce":
-                return self.binary_cross_entropy(Yhat, Y)
-            elif loss == "ce":
-                return self.cross_entropy(Yhat, Y)
-            else:
-                raise ValueError("Unknown loss")
-
-        # -----------------------------------------
-        # Логуємо
-        # -----------------------------------------
-        hist = {"epoch": [], "train_loss": [], "val_loss": [], "lr": []}
-
-        best = float("inf")
-        best_epoch = -1
-        best_params = {k: v.copy() for k, v in self.params.items()}
-        patience_ctr = 0
-
-        curr_lr = float(lr)
-        no_improve = 0
-
-        if reduce_lr_on_plateau is not None and lr_patience is None:
-            lr_patience = max(5, patience // 2)
-
-        def is_improved(score, best):
-            return (best - score) > min_delta
-
-        # =====================================================================
-        #                        ТРЕНУВАННЯ
-        # =====================================================================
-        for epoch in range(max_epochs + 1):
-
-            for Xb, Yb in self.batch_iter(Xtr, Ytr, batch_size=batch_size, shuffle=True, rng=rng):
-
-                grads = self.backward(
-                    Xb, Yb,
-                    hidden_activation=hidden_activation,
-                    output_activation=output_activation,
-                    loss=loss
-                )
-
-                if optimizer == "adam":
-                    self.adam_step(grads, lr=curr_lr, beta1=beta1, beta2=beta2, eps=eps)
+                # acc
+                if output_activation == "sigmoid":
+                    pred = (out >= 0.5).astype(int)
+                    acc = np.mean(pred == Yb)
                 else:
-                    self.sgd_step(grads, lr=curr_lr)
+                    pred = np.argmax(out, axis=1)
+                    true = np.argmax(Yb, axis=1)
+                    acc = np.mean(pred == true)
 
-            # ---- оцінка ----
-            Yhat_tr = self.predict(Xtr, hidden_activation, output_activation)
-            Yhat_va = self.predict(Xva, hidden_activation, output_activation)
+                hist["batch_step"].append(step_counter)
+                hist["batch_loss"].append(L)
+                hist["batch_acc"].append(acc)
 
-            train_loss = compute_loss(Yhat_tr, Ytr)
-            val_loss = compute_loss(Yhat_va, Yva)
+                grads = self.backward(Yb, out, hidden_activation, output_activation, loss)
+                self.update(grads, lr)
+
+                step_counter += 1
+
+            # end epoch
+            out_tr = self.forward(Xtr, hidden_activation, output_activation)
+            out_va = self.forward(Xva, hidden_activation, output_activation)
+
+            if loss == "bce":
+                L_tr = bce_loss(Ytr, out_tr)
+                L_va = bce_loss(Yva, out_va)
+            elif loss == "ce":
+                L_tr = ce_loss(Ytr, out_tr)
+                L_va = ce_loss(Yva, out_va)
+            else:
+                L_tr = mse_loss(Ytr, out_tr)
+                L_va = mse_loss(Yva, out_va)
+
+            # accuracy
+            if output_activation == "sigmoid":
+                acc_tr = np.mean((out_tr>=0.5).astype(int) == Ytr)
+                acc_va = np.mean((out_va>=0.5).astype(int) == Yva)
+            else:
+                acc_tr = np.mean(np.argmax(out_tr,axis=1) == np.argmax(Ytr,axis=1))
+                acc_va = np.mean(np.argmax(out_va,axis=1) == np.argmax(Yva,axis=1))
 
             hist["epoch"].append(epoch)
-            hist["train_loss"].append(train_loss)
-            hist["val_loss"].append(val_loss)
-            hist["lr"].append(curr_lr)
+            hist["train_loss"].append(L_tr)
+            hist["val_loss"].append(L_va)
+            hist["train_acc"].append(acc_tr)
+            hist["val_acc"].append(acc_va)
 
-            if verbose_every and epoch % verbose_every == 0:
-                print(f"epoch {epoch:3d} | train={train_loss:.6f} | val={val_loss:.6f}")
-
-            # --- Early stopping ---
-            if is_improved(val_loss, best):
-                best = val_loss
-                best_epoch = epoch
-                best_params = {k: v.copy() for k, v in self.params.items()}
-                patience_ctr = 0
-                no_improve = 0
-            else:
-                patience_ctr += 1
-                no_improve += 1
-
-                # Reduce LR
-                if reduce_lr_on_plateau is not None and no_improve >= lr_patience:
-                    new_lr = max(lr_min, curr_lr * reduce_lr_on_plateau)
-                    if new_lr < curr_lr:
-                        curr_lr = new_lr
-                        print(f"[LR] ↓ {curr_lr:.2e}")
-                    no_improve = 0
-
-                # Early stop
-                if patience_ctr >= patience:
-                    print(f"[STOP] epoch {epoch} (best {best_epoch})")
-                    self.params = best_params
-                    break
+            if verbose:
+                print(f"[Epoch {epoch}] loss={L_tr:.4f} val={L_va:.4f} acc={acc_tr:.3f} val_acc={acc_va:.3f}")
 
         return hist
 
-    # ======================================================================
-    #                           SAVE / LOAD
-    # ======================================================================
-    def save_weights(self, path):
-        flat = {"L": np.array(self.layers, dtype=np.int32)}
-        L = len(self.layers) - 1
-
-        for l in range(1, L + 1):
-            flat[f"W{l}"] = to_numpy(self.params[f"W{l}"])
-            flat[f"b{l}"] = to_numpy(self.params[f"b{l}"])
-
-        np.savez_compressed(path, **flat)
-
-    @classmethod
-    def load_weights(cls, path, seed=42):
-        data = np.load(path, allow_pickle=True)
-        layers = data["L"].tolist()
-        net = cls(layers, seed=seed)
-
-        L = len(layers) - 1
-        for l in range(1, L + 1):
-            net.params[f"W{l}"] = to_xp(data[f"W{l}"])
-            net.params[f"b{l}"] = to_xp(data[f"b{l}"])
-
-        return net
+    # ---------------------------------------------------------------------
+    # predict
+    # ---------------------------------------------------------------------
+    def predict(self, X, hidden_activation="relu", output_activation="sigmoid"):
+        return self.forward(X, hidden_activation, output_activation)
