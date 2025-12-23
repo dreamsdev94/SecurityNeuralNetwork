@@ -1,160 +1,160 @@
 import numpy as np
 
 
-def accuracy(yhat, ytrue):
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _argmax_classes(Y: np.ndarray) -> np.ndarray:
     """
-    Загальна точність класифікації.
+    Приводить різні формати цільових / предиктованих значень до
+    єдиного формату вектору цілочисельних індексів класів (N,).
 
-    Випадки:
-    1) Мультиклас: матриці форми (N, C) – argmax по стовпцях.
-    2) Бінарний: вектори або матриці (N,1).
-       - якщо ytrue у {0,1} → порівнюємо напряму з порогом 0.5 для yhat;
-       - інакше вважаємо, що це {-1,+1} і порівнюємо за знаком.
+    Підтримує:
+      - one-hot матрицю (N, C) → індекси класів 0..C-1 (argmax по осі 1),
+      - вектор (N,) з індексами → повертає як є (тільки приводить до int),
+      - вектор (N,1)           → стискає до (N,) і приводить до int.
+
+    Якщо форма не підходить — кидає ValueError.
     """
-    yhat = np.asarray(yhat)
-    ytrue = np.asarray(ytrue)
+    Y = np.asarray(Y)
 
-    if yhat.ndim == 1:
-        yhat = yhat.reshape(-1, 1)
-    if ytrue.ndim == 1:
-        ytrue = ytrue.reshape(-1, 1)
-
-    # Мультиклас
-    if yhat.shape[1] > 1 or ytrue.shape[1] > 1:
-        preds = np.argmax(yhat, axis=1)
-        true = np.argmax(ytrue, axis=1)
-        return float(np.mean(preds == true))
-
-    # Бінарний випадок
-    preds = (yhat >= 0.5).astype(int).ravel()
-
-    true_flat = ytrue.ravel()
-    uniques = np.unique(true_flat)
-
-    if np.all(np.isin(uniques, [0, 1])):
-        true = true_flat.astype(int)
-    else:
-        # припускаємо {-1,+1}
-        true = (true_flat >= 0).astype(int)
-
-    return float(np.mean(preds == true))
-
-
-def _as_1d(a):
-    a = np.asarray(a)
-    return a.reshape(-1)
-
-
-def acc_sign(yhat_pm1, ytrue_pm1):
-    """
-    Точність для бінарного випадку з мітками в {-1,+1}
-    (порівнюємо знак).
-    """
-    yh = np.sign(_as_1d(yhat_pm1))
-    yt = np.sign(_as_1d(ytrue_pm1))
-    return float(np.mean(yh == yt))
-
-
-def bin_f1_sign(yhat_pm1, ytrue_pm1):
-    """
-    F1-score для бінарного випадку з мітками в {-1,+1}.
-    Повертає (precision, recall, f1).
-    """
-    yh = np.sign(_as_1d(yhat_pm1))
-    yt = np.sign(_as_1d(ytrue_pm1))
-
-    tp = np.sum((yh == 1) & (yt == 1))
-    fp = np.sum((yh == 1) & (yt == -1))
-    fn = np.sum((yh == -1) & (yt == 1))
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = (
-        2 * precision * recall / (precision + recall)
-        if (precision + recall) > 0
-        else 0.0
-    )
-
-    return float(precision), float(recall), float(f1)
-
-
-def argmax_classes(Y_pm1):
-    """
-    Перетворює матрицю у {−1,+1} або в one-hot з будь-якими значеннями
-    у прогноз класу через argmax по осі 1.
-    """
-    Y = np.asarray(Y_pm1)
+    # Випадок: уже вектор індексів класів (N,)
     if Y.ndim == 1:
-        return np.zeros_like(Y, dtype=int)
-    return np.argmax(Y, axis=1)
+        return Y.astype(int)
+
+    # Випадок: матриця/вектор (N, 1) або (N, C)
+    if Y.ndim == 2:
+        if Y.shape[1] == 1:
+            # (N,1) → (N,)
+            return Y.reshape(-1).astype(int)
+        # One-hot / ймовірності (N, C) → argmax по осі класів
+        return np.argmax(Y, axis=1)
+
+    # Будь-яка інша форма поки що не підтримується
+    raise ValueError("Unsupported shape for class argmax")
 
 
-def accuracy_mc(Y_pred_pm1, Y_true_pm1):
+# ============================================================
+# METRICS FOR MULTICLASS PROBABILITIES
+# ============================================================
+
+def accuracy_mc(Y_pred: np.ndarray, Y_true: np.ndarray) -> float:
     """
-    Точність мультикласової класифікації (через argmax).
+    Точність (accuracy) для мультикласової задачі.
+
+    Y_true:
+      - може бути у вигляді one-hot матриці (N, C),
+      - або вектором індексів класів (N,),
+      - або (N,1) з індексами.
+
+    Y_pred:
+      - матриця ймовірностей або логітів (N, C).
+        Ми все одно беремо argmax, тож неважливо, чи це вже softmax,
+        чи просто логіти.
+
+    Обчислення:
+      1) t = _argmax_classes(Y_true) → вектор істинних індексів,
+      2) p = _argmax_classes(Y_pred) → вектор передбачених індексів,
+      3) accuracy = mean(t == p).
     """
-    t = argmax_classes(Y_true_pm1)
-    p = argmax_classes(Y_pred_pm1)
+    t = _argmax_classes(Y_true)
+    p = _argmax_classes(Y_pred)
+    # Частка правильно класифікованих об’єктів
     return float(np.mean(t == p))
 
 
-def macro_f1_mc(Y_pred_pm1, Y_true_pm1):
+def macro_f1_mc(Y_pred: np.ndarray, Y_true: np.ndarray) -> float:
     """
     Macro-F1 для мультикласової класифікації.
+
+    Ідея Macro-F1:
+      - рахуємо F1-міру окремо для кожного класу (як для "бінарної" задачі
+        типу "клас c проти усіх інших"),
+      - потім усереднюємо ці F1 по всіх класах (звичайне середнє арифм.).
+
+    Це дає рівний вклад кожного класу незалежно від його частоти
+    (на відміну від micro-F1 чи звичайної accuracy, де домінують часті класи).
+
+    Формально для кожного класу c:
+      tp_c — true positive (істинно-позитивні для класу c),
+      fp_c — false positive (помилково зараховані до класу c),
+      fn_c — false negative (клас c, передбачений не як c).
+
+      precision_c = tp_c / (tp_c + fp_c)
+      recall_c    = tp_c / (tp_c + fn_c)
+      F1_c        = 2 * precision_c * recall_c / (precision_c + recall_c)
+
+    Macro-F1 = mean(F1_c по всіх класах, де є хоча б один приклад).
     """
-    t = argmax_classes(Y_true_pm1)
-    p = argmax_classes(Y_pred_pm1)
-    classes = np.unique(t)
-    f1_scores = []
+    # t — істинні індекси класів
+    t = _argmax_classes(Y_true)
+    # p — передбачені індекси класів
+    p = _argmax_classes(Y_pred)
 
-    for c in classes:
-        tp = np.sum((p == c) & (t == c))
-        fp = np.sum((p == c) & (t != c))
-        fn = np.sum((p != c) & (t == c))
+    # Кількість класів: припускаємо, що індекси йдуть від 0 до max(...)
+    C = int(max(t.max(), p.max()) + 1)
+    f1s = []  # список F1 для кожного класу
 
+    for c in range(C):
+        # Для класу c: позитивні — це ті, де t == c
+        tp = np.sum((t == c) & (p == c))      # передбачили c і це було c
+        fp = np.sum((t != c) & (p == c))      # передбачили c, але це не c
+        fn = np.sum((t == c) & (p != c))      # це c, але передбачили не c
+
+        # Якщо в даті взагалі немає прикладів класу c (ні t, ні p) —
+        # пропускаємо його, щоб не псувати середнє "штучним нулем".
+        if tp == 0 and fp == 0 and fn == 0:
+            continue
+
+        # Обережно рахуємо precision/recall, перевіряючи знаменники на 0
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        # Якщо і precision, і recall == 0, F1 визначаємо як 0
         if prec + rec > 0:
             f1 = 2 * prec * rec / (prec + rec)
         else:
             f1 = 0.0
-        f1_scores.append(f1)
 
-    if len(f1_scores) == 0:
+        f1s.append(f1)
+
+    # Якщо з якоїсь причини жоден клас не потрапив у список (дуже патологічний випадок)
+    if not f1s:
         return 0.0
-    return float(np.mean(f1_scores))
+
+    # Середнє F1 по всіх класах
+    return float(np.mean(f1s))
 
 
-def topk_accuracy_mc(Y_pred_pm1, Y_true_pm1, k=5):
+def confusion_matrix_mc(Y_true: np.ndarray, Y_pred: np.ndarray) -> np.ndarray:
     """
-    Top-k accuracy для мультикласу.
+    Матриця невідповідностей (confusion matrix) для мультикласу.
+
+    Формат:
+      - Рядки — істинні класи (true labels),
+      - Стовпці — передбачені класи (predicted labels).
+
+    M[i, j] показує, скільки об'єктів з істинним класом i
+    було віднесено моделлю до класу j.
+
+    Це корисно для детального аналізу помилок:
+      - де модель плутає класи між собою,
+      - які саме класи "змішуються".
     """
-    Y_pred = np.asarray(Y_pred_pm1)
-    Y_true = np.asarray(Y_true_pm1)
+    # Приводимо до індексів класів
+    t = _argmax_classes(Y_true)
+    p = _argmax_classes(Y_pred)
 
-    if Y_pred.ndim == 1:
-        Y_pred = Y_pred.reshape(-1, 1)
-    if Y_true.ndim == 1:
-        Y_true = Y_true.reshape(-1, 1)
+    # Кількість класів — максимум з усіх індексів + 1
+    C = int(max(t.max(), p.max()) + 1)
 
-    true = np.argmax(Y_true, axis=1)
-    topk = np.argsort(-Y_pred, axis=1)[:, :k]
-
-    hits = 0
-    for i in range(len(true)):
-        if true[i] in topk[i]:
-            hits += 1
-    return float(hits / len(true))
-
-
-def confusion_matrix_mc(Y_true_pm1, Y_pred_pm1):
-    """
-    Матриця невідповідностей (rows=true, cols=pred), тип int.
-    """
-    t = argmax_classes(Y_true_pm1)
-    p = argmax_classes(Y_pred_pm1)
-    C = int(np.max([t.max(), p.max()]) + 1)
+    # Створюємо порожню матрицю C x C, заповнену нулями (тип int)
     M = np.zeros((C, C), dtype=int)
+
+    # Для кожного прикладу збільшуємо відповідний елемент
+    # за правилами: рядок = true, стовпець = pred
     for i in range(len(t)):
         M[t[i], p[i]] += 1
+
     return M
