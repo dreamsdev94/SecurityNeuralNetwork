@@ -9,10 +9,10 @@ import pandas as pd
 @dataclass
 class Dataset:
     """
-    Проста структура для зберігання розбитого датасету:
-      X_train, y_train — навчальна вибірка
-      X_val,   y_val   — валідаційна вибірка
-      meta            — словник з додатковою інформацією (масштабування, назви ознак тощо)
+    A simple structure for storing a split dataset:
+      X_train, y_train — training split
+      X_val,   y_val   — validation split
+      meta            — a dictionary with additional information (scaling, feature names, etc.)
     """
     X_train: np.ndarray
     y_train: np.ndarray
@@ -21,8 +21,8 @@ class Dataset:
     meta: Dict[str, Any]
 
     def __repr__(self) -> str:
-        # Виводимо тільки розміри масивів та список ключів meta,
-        # щоб не засмічувати лог величезними структурами.
+        # Print only array shapes and the list of meta keys
+        # to avoid polluting logs with huge structures.
         meta_keys = list(self.meta.keys())
         return (
             "Dataset(\n"
@@ -35,46 +35,47 @@ class Dataset:
 
 def _to_numeric_features(df: pd.DataFrame, exclude_cols=None) -> Tuple[np.ndarray, pd.DataFrame, list]:
     """
-    Перетворення всіх колонок (крім exclude_cols) у числові.
-    Нечислові значення → NaN → заповнюємо медіаною.
-    Також видаляємо:
-      * колонки, де всі значення NaN
-      * константні колонки (усі значення однакові)
-    Повертаємо:
+    Converts all columns (except exclude_cols) to numeric.
+    Non-numeric values → NaN → filled with the median.
+    Also removes:
+      * columns where all values are NaN
+      * constant columns (all values identical)
+
+    Returns:
       X (np.ndarray),
-      df_num (DataFrame з ознаками),
-      dropped_cols (список видалених колонок)
+      df_num (DataFrame with features),
+      dropped_cols (list of removed columns)
     """
     if exclude_cols is None:
         exclude_cols = []
 
-    # Колонки, які будемо використовувати як ознаки
+    # Columns to use as features
     feat_cols = [c for c in df.columns if c not in exclude_cols]
     df_feat = df[feat_cols].copy()
 
-    # Пробуємо привести кожну ознаку до float (усе, що не вийшло, стане NaN)
+    # Try to cast each feature to float (anything that fails becomes NaN)
     for c in feat_cols:
         df_feat[c] = pd.to_numeric(df_feat[c], errors="coerce")
 
     dropped_cols = []
 
-    # 1) Викидаємо повністю порожні (усі NaN) колонки
+    # 1) Drop fully empty columns (all NaN)
     all_nan = df_feat.isna().all(axis=0)
     if all_nan.any():
         for c in df_feat.columns[all_nan]:
             dropped_cols.append(c)
         df_feat = df_feat.loc[:, ~all_nan]
 
-    # 2) Викидаємо константні колонки (одне й те саме значення у всіх рядках)
+    # 2) Drop constant columns (the same value in all rows)
     const_cols = [c for c in df_feat.columns if df_feat[c].nunique(dropna=True) <= 1]
     if const_cols:
         dropped_cols.extend(const_cols)
         df_feat = df_feat.drop(columns=const_cols)
 
-    # 3) Заповнюємо пропуски (NaN) медіаною по кожній ознаці
+    # 3) Fill missing values (NaN) with the per-feature median
     df_feat = df_feat.fillna(df_feat.median(numeric_only=True))
 
-    # Фінальна матриця ознак
+    # Final feature matrix
     X = df_feat.values.astype(float)
     return X, df_feat, dropped_cols
 
@@ -86,26 +87,26 @@ def _train_val_split(
     random_state: int = 42,
 ):
     """
-    Розбиває дані на train/val з фіксованим random_state.
+    Splits the data into train/val with a fixed random_state.
 
-    ВАЖЛИВО:
-      Використовується той самий random_state і для бінарної, і для мультикласової
-      цілі, тому розбиття узгоджене (одні й ті самі індекси потрапляють у train/val
-      і для детектора, і для класифікатора).
+    IMPORTANT:
+      The same random_state is used for both binary and multiclass targets,
+      so the split is aligned (the same indices go to train/val
+      for both the detector and the classifier).
     """
     n = X.shape[0]
     rng = np.random.default_rng(random_state)
 
-    # Перемішуємо індекси об'єктів
+    # Shuffle sample indices
     indices = np.arange(n)
     rng.shuffle(indices)
 
-    # Розмір валідаційної частини
+    # Validation set size
     val_size = int(round(n * val_ratio))
     val_idx = indices[:val_size]
     train_idx = indices[val_size:]
 
-    # Повертаємо X_train, y_train, X_val, y_val
+    # Return X_train, y_train, X_val, y_val
     return (
         X[train_idx],
         y[train_idx],
@@ -120,16 +121,16 @@ def _oversample_binary(
     random_state: int = 42,
 ):
     """
-    Проста стратегія балансування бінарних класів шляхом реплікації
-    меншого класу (oversampling).
+    A simple strategy to balance binary classes by replicating
+    the minority class (oversampling).
 
-    y очікується форми (N, 1) або (N,).
+    y is expected to have shape (N, 1) or (N,).
     """
-    # Перетворюємо y у плоский вектор міток (0/1)
+    # Convert y to a flat vector of labels (0/1)
     y_flat = y.reshape(-1)
     classes, counts = np.unique(y_flat, return_counts=True)
     if len(classes) < 2:
-        # Якщо всього один клас — нічого балансувати
+        # If there is only one class — nothing to balance
         return X, y
 
     max_count = counts.max()
@@ -139,15 +140,15 @@ def _oversample_binary(
     for cls, cnt in zip(classes, counts):
         cls_idx = np.where(y_flat == cls)[0]
         if cnt < max_count:
-            # Якщо клас рідкісний — добираємо випадкові індекси з нього із повторенням
+            # If the class is rare — sample extra indices with replacement
             extra = rng.choice(cls_idx, size=max_count - cnt, replace=True)
             new_idx = np.concatenate([cls_idx, extra])
         else:
-            # Якщо клас уже має max_count зразків — лишаємо як є
+            # If the class already has max_count samples — keep as is
             new_idx = cls_idx
         idx_all.append(new_idx)
 
-    # Об'єднуємо індекси і знову перемішуємо
+    # Concatenate indices and shuffle again
     idx_all = np.concatenate(idx_all)
     rng.shuffle(idx_all)
     return X[idx_all], y[idx_all]
@@ -159,12 +160,12 @@ def _oversample_multiclass(
     random_state: int = 42,
 ):
     """
-    Балансування мультикласу one-hot (N, C) шляхом реплікації рідкісних класів.
+    Balances multiclass one-hot labels (N, C) by replicating rare classes.
 
-    Алгоритм аналогічний _oversample_binary, але мітки беруться як argmax по
-    one-hot вектору.
+    The algorithm is similar to _oversample_binary, but labels are taken as argmax of
+    the one-hot vector.
     """
-    # argmax перетворює one-hot матрицю на вектор індексів класів
+    # argmax converts the one-hot matrix into a vector of class indices
     labels = np.argmax(y, axis=1)
     classes, counts = np.unique(labels, return_counts=True)
     if len(classes) < 2:
@@ -177,8 +178,8 @@ def _oversample_multiclass(
     for cls, cnt in zip(classes, counts):
         cls_idx = np.where(labels == cls)[0]
         if cnt < max_count:
-            # Добираємо елементи рідкісного класу з повторенням,
-            # щоб довести до max_count
+            # Sample extra elements from the rare class with replacement
+            # to reach max_count
             extra = rng.choice(cls_idx, size=max_count - cnt, replace=True)
             new_idx = np.concatenate([cls_idx, extra])
         else:
@@ -202,26 +203,26 @@ def create_dataset(
     out_dir: str = "datasets_npz",
 ):
     """
-    Створює два датасети (з однаковими ознаками X_all):
-      1) Для детектора (бінарний) — цільова колонка `label`
-      2) Для класифікатора (мультиклас) — цільова колонка `type`
+    Creates two datasets (with the same shared feature matrix X_all):
+      1) For the detector (binary) — target column `label`
+      2) For the classifier (multiclass) — target column `type`
 
-    Повертає: (det_dataset, cls_dataset), де кожен — екземпляр Dataset.
+    Returns: (det_dataset, cls_dataset), where each is a Dataset instance.
     """
     print(f"[LOAD] CSV → {csv_path}")
     df = pd.read_csv(csv_path)
     print(f"[SHAPE] initial: {df.shape}")
 
-    # Перевіряємо наявність обов'язкових колонок
+    # Check required columns
     if "label" not in df.columns or "type" not in df.columns:
-        raise ValueError("Очікуються колонки 'label' і 'type' у CSV-файлі.")
+        raise ValueError("Expected columns 'label' and 'type' in the CSV file.")
 
-    # === ОЗНАКИ (спільні для обох задач) ===
+    # === FEATURES (shared for both tasks) ===
     exclude_cols = ["label", "type"]
     X_all, df_feat, dropped_cols = _to_numeric_features(df, exclude_cols=exclude_cols)
 
-    # Імена ознак та їх медіани зберігаємо в meta, щоб потім
-    # їх можна було використовувати в realtime-скриптах без повторного парсингу CSV.
+    # Store feature names and their medians in meta so they can be used later
+    # in realtime scripts without re-parsing the CSV.
     feature_names = df_feat.columns.tolist()
     feature_medians = df_feat.median(numeric_only=True).to_dict()
 
@@ -230,45 +231,45 @@ def create_dataset(
     else:
         print("[CLEAN] no constant/empty feature columns removed")
 
-    # === Бінарна ціль для детектора ===
-    # Колонка label → (N, 1)
+    # === Binary target for the detector ===
+    # Column label → (N, 1)
     y_bin = df["label"].astype(int).values.reshape(-1, 1)
 
-    # === Мультикласова ціль для класифікатора ===
-    # Беремо колонку type, фіксуємо унікальні значення у порядку появи
+    # === Multiclass target for the classifier ===
+    # Take the 'type' column and fix unique values in order of appearance
     type_series = df["type"].astype(str)
-    class_names = list(type_series.unique())  # порядок появи в датасеті
+    class_names = list(type_series.unique())  # order of appearance in the dataset
     type_to_idx = {name: i for i, name in enumerate(class_names)}
     y_idx = type_series.map(type_to_idx).values
 
-    # Будуємо one-hot матрицю (N, C)
+    # Build the one-hot matrix (N, C)
     n_samples = len(df)
     n_classes = len(class_names)
     y_mc = np.zeros((n_samples, n_classes), dtype=float)
     y_mc[np.arange(n_samples), y_idx] = 1.0
 
-    # === Спліт на train/val (один і той самий для обох задач) ===
-    # Спочатку розбиваємо X_all і бінарну мітку
+    # === Train/val split (the same one for both tasks) ===
+    # First, split X_all and the binary label
     X_tr, y_bin_tr, X_va, y_bin_va = _train_val_split(
         X_all, y_bin, val_ratio=val_ratio, random_state=random_state
     )
-    # Потім з тим самим random_state розбиваємо X_all і мультикласову мітку:
-    # індекси будуть тими ж самими, тож X_tr/X_va збігатимуться для обох задач.
+    # Then, with the same random_state, split X_all and the multiclass label:
+    # indices will be the same, so X_tr/X_va will match for both tasks.
     _, y_mc_tr, _, y_mc_va = _train_val_split(
         X_all, y_mc, val_ratio=val_ratio, random_state=random_state
     )
 
-    # === Функція масштабування (локальна) ===
+    # === Scaling function (local) ===
     def _scale(X_train, X_val, mode: str):
         """
-        Масштабує X_train, X_val і повертає також словник stats
-        з параметрами масштабування для подальшого використання.
+        Scales X_train, X_val and also returns a stats dictionary
+        with scaling parameters for later reuse.
         """
         if mode == "zscore":
             # Z-score: (x - mean) / std
             mean = X_train.mean(axis=0, keepdims=True)
             std = X_train.std(axis=0, keepdims=True)
-            std[std == 0] = 1.0  # захист від ділення на нуль
+            std[std == 0] = 1.0  # guard against division by zero
             X_train_s = (X_train - mean) / std
             X_val_s = (X_val - mean) / std
             return X_train_s, X_val_s, {"mean": mean, "std": std}
@@ -277,28 +278,28 @@ def create_dataset(
             xmin = X_train.min(axis=0, keepdims=True)
             xmax = X_train.max(axis=0, keepdims=True)
             denom = xmax - xmin
-            denom[denom == 0] = 1.0  # щоб не ділити на 0
+            denom[denom == 0] = 1.0  # avoid division by 0
             X_train_s = (X_train - xmin) / denom
             X_val_s = (X_val - xmin) / denom
             return X_train_s, X_val_s, {"min": xmin, "max": xmax}
         else:
-            # Без масштабування — просто повертаємо вхідні масиви
+            # No scaling — return the inputs as is
             return X_train, X_val, {}
 
-    # === ДЕТЕКТОР (бінарна задача) ===
-    # Масштабуємо копії X_tr, X_va (щоб не псувати X_all)
+    # === DETECTOR (binary task) ===
+    # Scale copies of X_tr, X_va (so we do not modify X_all)
     X_det_tr, X_det_va, stats_det = _scale(
         X_tr.copy(), X_va.copy(), scaling_detector
     )
     y_det_tr, y_det_va = y_bin_tr, y_bin_va
 
-    # За потреби балансуємо класи для тренування детектора
+    # Optionally balance classes for detector training
     if oversample_detector:
         X_det_tr, y_det_tr = _oversample_binary(
             X_det_tr, y_det_tr, random_state=random_state
         )
 
-    # Метадані для детектора — все, що потрібно для відтворення preprocessing
+    # Detector metadata — everything needed to reproduce preprocessing
     det_meta = {
         "task": "detector",
         "scaling": scaling_detector,
@@ -317,13 +318,13 @@ def create_dataset(
         meta=det_meta,
     )
 
-    # === КЛАСИФІКАТОР (мультикласова задача) ===
+    # === CLASSIFIER (multiclass task) ===
     X_cls_tr, X_cls_va, stats_cls = _scale(
         X_tr.copy(), X_va.copy(), scaling_classifier
     )
     y_cls_tr, y_cls_va = y_mc_tr, y_mc_va
 
-    # Oversampling рідкісних класів для класифікатора
+    # Oversample rare classes for the classifier
     if oversample_classifier:
         X_cls_tr, y_cls_tr = _oversample_multiclass(
             X_cls_tr, y_cls_tr, random_state=random_state
@@ -352,7 +353,7 @@ def create_dataset(
     print(det_ds)
     print(cls_ds)
 
-    # === (ОПЦІЙНО) ЗБЕРЕЖЕННЯ У .NPZ ФАЙЛИ ===
+    # === (OPTIONAL) SAVE TO .NPZ FILES ===
     if save_npz:
         os.makedirs(out_dir, exist_ok=True)
         det_path = os.path.join(out_dir, "detector_dataset.npz")

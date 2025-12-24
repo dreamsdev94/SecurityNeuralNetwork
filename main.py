@@ -8,83 +8,83 @@ from network import Network, set_backend
 from metrics import accuracy_mc, macro_f1_mc
 
 
-# НАЛАШТУВАННЯ В ОДНОМУ МІСЦІ
+# SETTINGS IN ONE PLACE
 
-# --- Загальне ---
-USE_GPU = False  # чи пробувати використовувати GPU (CuPy)
+# --- General ---
+USE_GPU = False  # whether to try using GPU (CuPy)
 
 CSV_PATH = "Train_Test_Windows_10.csv"
 
-# Нормалізація
-SCALING_DETECTOR = "minmax"      # "zscore" або "minmax"
+# Normalization
+SCALING_DETECTOR = "minmax"      # "zscore" or "minmax"
 SCALING_CLASSIFIER = "zscore"
 
 # Oversampling
-OVERSAMPLE_DETECTOR = True       # балансувати класи для детектора
-OVERSAMPLE_CLASSIFIER = True     # балансувати класи для класифікатора
+OVERSAMPLE_DETECTOR = True       # balance classes for the detector
+OVERSAMPLE_CLASSIFIER = True     # balance classes for the classifier
 
-# Архітектура
-# кількість прихованих шарів
+# Architecture
+# number of hidden layers
 DET_HIDDEN_LAYERS = 5
 CLS_HIDDEN_LAYERS = 5
 
-# стартовий розмір першого прихованого шару
+# starting size of the first hidden layer
 DET_START_SIZE = 128
 CLS_START_SIZE = 128
 
-# мінімальний розмір прихованого шару
+# minimum hidden layer size
 MIN_HIDDEN_SIZE = 16
 
-# ініціалізація ваг
+# weight initialization
 DET_INIT = "xavier_normal"       # "xavier_normal", "xavier_uniform", "he"
 CLS_INIT = "xavier_normal"
 
-# Оптимізатор навчання
+# Training optimizer
 OPTIMIZER = None
 
-# --- Активації та loss ---
+# --- Activations and loss ---
 DET_HIDDEN_ACTIVATION = "relu"       # "relu", "gelu", "tanh", "sigmoid"
 CLS_HIDDEN_ACTIVATION = "tanh"       # "relu", "gelu", "tanh", "sigmoid"
 
-DET_OUTPUT_ACTIVATION = "sigmoid"    # бінарний вихід (ймовірність аномалії)
-CLS_OUTPUT_ACTIVATION = "softmax"    # мультикласовий вихід (розподіл по класах)
+DET_OUTPUT_ACTIVATION = "sigmoid"    # binary output (anomaly probability)
+CLS_OUTPUT_ACTIVATION = "softmax"    # multiclass output (class distribution)
 
-DET_LOSS = "bce"                 # "bce" або "mse"
-CLS_LOSS = "ce"                  # "ce" або "mse"
+DET_LOSS = "bce"                 # "bce" or "mse"
+CLS_LOSS = "ce"                  # "ce" or "mse"
 
 # --- LayerNorm ---
 USE_LAYER_NORM = False
-LAYER_NORM_EVERY_K = 0           # 1 = кожен шар, 2 = кожен другий, <=0 = вимкнути LN
+LAYER_NORM_EVERY_K = 0           # 1 = every layer, 2 = every other layer, <=0 = disable LN
 
-# Коефіцієнт навчання
+# Learning rate
 DET_LR = 1e-3
 CLS_LR = 1e-3
 
-# Розмір батчу
+# Batch size
 DET_BATCH_SIZE = 256
 CLS_BATCH_SIZE = 256
 
-# Максимальна кількість епох
+# Maximum number of epochs
 DET_MAX_EPOCHS = 50
 CLS_MAX_EPOCHS = 50
 
-# Кількість епох без покращення для ранньої зупинки
+# Number of epochs without improvement for early stopping
 DET_PATIENCE = 10
 CLS_PATIENCE = 10
 MIN_DELTA = 1e-5
 
-# Вимикач ранньої зупинки
+# Early stopping switch
 EARLY_STOPPING = False
 
-# --- Збереження / логування / графіки ---
-SAVE_MODELS = True          # зберігати ваги .npz
-SAVE_LOGS = True            # зберігати txt-лог
-SAVE_PLOTS = True           # глобально: будувати та зберігати графіки
-DEBUG_TRAINING_OUTPUT = True  # виводити епохи в консоль з fit(debug_show=...)
+# --- Saving / logging / plots ---
+SAVE_MODELS = True          # save .npz weights
+SAVE_LOGS = True            # save txt log
+SAVE_PLOTS = True           # global: build and save plots
+DEBUG_TRAINING_OUTPUT = True  # print epochs to console via fit(debug_show=...)
 
-# окреме керування побудовою графіків
-PLOT_DETECTOR = True        # якщо False — графіки детектора не будуються
-PLOT_CLASSIFIER = True      # якщо False — графіки класифікатора не будуються
+# separate control over plotting
+PLOT_DETECTOR = True        # if False — detector plots are not generated
+PLOT_CLASSIFIER = True      # if False — classifier plots are not generated
 
 MODELS_DIR = "models"
 LOGS_DIR = "logs"
@@ -92,23 +92,23 @@ PLOTS_DIR = "plots"
 
 
 # ============================================================
-# Допоміжні функції
+# Helper functions
 # ============================================================
 
 def get_config_dict():
     """
-    Збирає всі глобальні КАПС-налаштування з цього модуля,
-    щоб зберегти їх у txt-лог.
+    Collects all global CAPS settings from this module
+    in order to save them into the txt log.
 
-    Важливо: ми явно фільтруємо тільки ті константи, які вказані у set(),
-    щоб випадково не захопити щось зайве (наприклад, імпортовані з інших модулів).
+    Important: we explicitly filter only the constants listed in set(),
+    so we do not accidentally capture anything extra (e.g., imported from other modules).
     """
     import sys
     module = sys.modules[__name__]
     cfg = {}
     for name, value in module.__dict__.items():
         if name.isupper() and not name.startswith("_"):
-            # фільтр, щоб не ловити імпортовані CONSTANTS з інших модулів
+            # filter to avoid picking up imported CONSTANTS from other modules
             if name in {
                 "USE_GPU",
                 "CSV_PATH",
@@ -160,31 +160,31 @@ def build_deep_architecture(input_dim: int,
                             min_hidden: int,
                             output_dim: int):
     """
-    Побудова списку розмірів шарів типу:
+    Builds a list of layer sizes of the form:
       [input_dim, h1, h2, ..., hN, output_dim]
 
-    Кожен наступний прихований шар зменшується ~x0.75,
-    але не менше за min_hidden.
+    Each subsequent hidden layer shrinks by ~x0.75,
+    but not below min_hidden.
 
-    Це дає "пірамідальну" архітектуру: широкий перший шар, далі звуження.
+    This yields a "pyramidal" architecture: a wide first layer, then narrowing.
     """
     sizes = []
     cur = start_size
     for _ in range(n_hidden):
         sizes.append(cur)
-        # зменшуємо кількість нейронів, але не опускаємося нижче min_hidden
+        # decrease the number of neurons, but do not go below min_hidden
         next_size = int(cur * 0.75)
         if next_size < min_hidden:
             next_size = min_hidden
         cur = next_size
-    # додаємо вхідний та вихідний розміри
+    # add input and output dimensions
     return [input_dim] + sizes + [output_dim]
 
 
 def ensure_dirs():
     """
-    Гарантує наявність директорій для моделей, логів і графіків.
-    Якщо прапорці вимкнені — каталоги не створюються.
+    Ensures the directories for models, logs, and plots exist.
+    If the flags are disabled — directories are not created.
     """
     if SAVE_MODELS:
         os.makedirs(MODELS_DIR, exist_ok=True)
@@ -201,30 +201,30 @@ def save_log_txt(log_path: str,
                  final_info_lines,
                  is_binary: bool):
     """
-    log_path          — шлях до txt-файлу
-    model_type        — "DETECTOR" або "CLASSIFIER"
-    layers            — список розмірів шарів
-    history           — словник, який повертає Network.fit()
-    final_info_lines  — список текстових рядків, які ми виводимо в консоль
-    is_binary         — True для детектора, False для класифікатора
+    log_path          — path to the txt file
+    model_type        — "DETECTOR" or "CLASSIFIER"
+    layers            — list of layer sizes
+    history           — dictionary returned by Network.fit()
+    final_info_lines  — list of text lines that we print to the console
+    is_binary         — True for the detector, False for the classifier
 
-    По суті, це "зліпок" усіх налаштувань + історії навчання +
-    підсумкових метрик для конкретного запуску.
+    In essence, this is a "snapshot" of all settings + training history +
+    final metrics for a particular run.
     """
     cfg = get_config_dict()
 
     with open(log_path, "w", encoding="utf-8") as f:
-        # 1) Повна конфігурація з main.py
+        # 1) Full configuration from main.py
         f.write("=== CONFIG (main.py) ===\n")
         for k in sorted(cfg.keys()):
             f.write(f"{k} = {cfg[k]}\n")
         f.write("\n")
 
-        # 2) Інформація про модель
+        # 2) Model information
         f.write(f"Model type: {model_type}\n")
         f.write(f"Layers: {layers}\n\n")
 
-        # 3) Історія навчання по епохах
+        # 3) Training history by epochs
         f.write("=== TRAINING HISTORY ===\n")
         epochs = history.get("epoch", [])
         for i, ep in enumerate(epochs):
@@ -255,7 +255,7 @@ def save_log_txt(log_path: str,
                     f"val_macroF1={macro_f1:.4f}\n"
                 )
 
-        # 4) Підсумкові метрики по найкращій моделі
+        # 4) Final metrics for the best model
         f.write("\n=== FINAL METRICS ===\n")
         for line in final_info_lines:
             f.write(line + "\n")
@@ -263,20 +263,20 @@ def save_log_txt(log_path: str,
 
 def plot_history(history: dict, base_name: str, out_dir: str):
     """
-    Будує та зберігає графіки по history, яке повертає Network.fit().
-    Створює кілька .png-файлів у вказаній папці.
+    Builds and saves plots from the history returned by Network.fit().
+    Creates several .png files in the specified folder.
 
-    base_name — базова частина імен файлів (без розширення),
-    out_dir   — каталог, куди зберігати графіки.
+    base_name — base part of file names (without extension),
+    out_dir   — directory where plots are saved.
     """
     import matplotlib.pyplot as plt
 
     epochs = history.get("epoch", [])
     if not epochs:
-        # якщо history порожня — нічого малювати
+        # if history is empty — nothing to plot
         return
 
-    # Графік loss (train / val)
+    # Loss plot (train / val)
     train_loss = history.get("train_loss", [])
     val_loss = history.get("val_loss", [])
 
@@ -291,9 +291,9 @@ def plot_history(history: dict, base_name: str, out_dir: str):
     plt.savefig(os.path.join(out_dir, base_name + "_loss.png"))
     plt.close()
 
-    # Бінарний або мультикласовий варіант
+    # Binary or multiclass variant
     if "val_macro_f1" in history:
-        # мультикласовий класифікатор
+        # multiclass classifier
         val_acc = history.get("val_acc", [])
         val_macro_f1 = history.get("val_macro_f1", [])
 
@@ -309,7 +309,7 @@ def plot_history(history: dict, base_name: str, out_dir: str):
         plt.close()
 
     elif "val_precision" in history:
-        # бінарний детектор
+        # binary detector
         val_acc = history.get("val_acc", [])
         val_prec = history.get("val_precision", [])
         val_rec = history.get("val_recall", [])
@@ -334,36 +334,36 @@ def plot_history(history: dict, base_name: str, out_dir: str):
 # ============================================================
 
 def main():
-    # 1) GPU / CPU — обрати бекенд для обчислень
+    # 1) GPU / CPU — choose the computation backend
     set_backend(USE_GPU)
 
-    # 2) Папки для моделей, логів і графіків
+    # 2) Folders for models, logs, and plots
     ensure_dirs()
 
-    # 3) Завантаження та підготовка даних
+    # 3) Load and prepare the data
     # create_dataset:
-    #   - читає CSV,
-    #   - чистить/перетворює ознаки,
-    #   - формує train/val спліт,
-    #   - масштабує (zscore/minmax),
-    #   - виконує oversampling (якщо потрібно),
-    #   - повертає два Dataset: для детектора і для класифікатора.
+    #   - reads the CSV,
+    #   - cleans/transforms features,
+    #   - creates a train/val split,
+    #   - scales (zscore/minmax),
+    #   - performs oversampling (if needed),
+    #   - returns two Datasets: one for the detector and one for the classifier.
     det_ds, cls_ds = create_dataset(
         CSV_PATH,
         scaling_detector=SCALING_DETECTOR,
         scaling_classifier=SCALING_CLASSIFIER,
         oversample_detector=OVERSAMPLE_DETECTOR,
         oversample_classifier=OVERSAMPLE_CLASSIFIER,
-        save_npz=True,  # паралельно зберігаємо підготовлені датасети у .npz
+        save_npz=True,  # also save the prepared datasets to .npz in parallel
     )
 
-    # 4) Архітектури
-    # розміри входу для обох мереж (кількість ознак)
+    # 4) Architectures
+    # input sizes for both networks (number of features)
     in_det = det_ds.X_train.shape[1]
     in_cls = cls_ds.X_train.shape[1]
-    # вихід детектора — один нейрон (ймовірність аномалії)
+    # detector output — one neuron (anomaly probability)
     out_det = 1
-    # вихід класифікатора — кількість класів (one-hot)
+    # classifier output — number of classes (one-hot)
     out_cls = cls_ds.y_train.shape[1]
 
     det_arch = build_deep_architecture(
@@ -381,7 +381,7 @@ def main():
         output_dim=out_cls,
     )
 
-    # Додаємо мітку часу, щоб файли не перезаписували один одного між запусками
+    # Add a timestamp so files do not overwrite each other between runs
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     det_base = f"detector_{DET_HIDDEN_LAYERS}layers_{timestamp}"
     cls_base = f"classifier_{CLS_HIDDEN_LAYERS}layers_{timestamp}"
@@ -389,8 +389,8 @@ def main():
     print("\n=== TRAINING DETECTOR ===")
     print(f"Detector architecture: {det_arch}")
 
-    # 5) Детектор
-    # Створюємо мережу для бінарної задачі
+    # 5) Detector
+    # Create a network for the binary task
     det_net = Network(
         det_arch,
         init=DET_INIT,
@@ -398,7 +398,7 @@ def main():
         ln_every_k=LAYER_NORM_EVERY_K,
     )
 
-    # Запускаємо навчання детектора
+    # Train the detector
     det_history = det_net.fit(
         det_ds.X_train,
         det_ds.y_train,
@@ -417,24 +417,24 @@ def main():
         debug_show=DEBUG_TRAINING_OUTPUT,
     )
 
-    # Предикт на валідації для фінальних метрик детектора
+    # Prediction on validation for the detector's final metrics
     y_true_det = det_ds.y_val.reshape(-1).astype(int)
     y_pred_proba_det = det_net.predict(
         det_ds.X_val,
         hidden_activation=DET_HIDDEN_ACTIVATION,
         output_activation=DET_OUTPUT_ACTIVATION,
     ).reshape(-1)
-    # Перетворення ймовірностей у бінарні мітки за порогом 0.5
+    # Convert probabilities to binary labels using the 0.5 threshold
     y_pred_det = (y_pred_proba_det >= 0.5).astype(int)
 
-    # Підрахунок елементів матриці невідповідностей:
-    # TN — 0 передбачено як 0, TP — 1 передбачено як 1, FP, FN — помилки.
+    # Compute confusion-matrix elements:
+    # TN — 0 predicted as 0, TP — 1 predicted as 1, FP, FN — errors.
     tn = int(np.sum((y_pred_det == 0) & (y_true_det == 0)))
     fp = int(np.sum((y_pred_det == 1) & (y_true_det == 0)))
     fn = int(np.sum((y_pred_det == 0) & (y_true_det == 1)))
     tp = int(np.sum((y_pred_det == 1) & (y_true_det == 1)))
 
-    # Обчислення класичних бінарних метрик
+    # Compute classic binary metrics
     det_acc = (tp + tn) / len(y_true_det) if len(y_true_det) > 0 else 0.0
     det_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     det_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -454,11 +454,11 @@ def main():
     for line in det_lines:
         print(line)
 
-    # 6) Класифікатор
+    # 6) Classifier
     print("\n=== TRAINING CLASSIFIER ===")
     print(f"Classifier architecture: {cls_arch}")
 
-    # Мережа для мультикласової задачі
+    # Network for the multiclass task
     cls_net = Network(
         cls_arch,
         init=CLS_INIT,
@@ -466,7 +466,7 @@ def main():
         ln_every_k=LAYER_NORM_EVERY_K,
     )
 
-    # Навчання класифікатора
+    # Train the classifier
     cls_history = cls_net.fit(
         cls_ds.X_train,
         cls_ds.y_train,
@@ -485,7 +485,7 @@ def main():
         debug_show=DEBUG_TRAINING_OUTPUT,
     )
 
-    # Перетворюємо one-hot у індекси класів для істинних і передбачених меток
+    # Convert one-hot to class indices for true and predicted labels
     y_true_cls = np.argmax(cls_ds.y_val, axis=1)
     y_pred_proba_cls = cls_net.predict(
         cls_ds.X_val,
@@ -494,11 +494,11 @@ def main():
     )
     y_pred_cls = np.argmax(y_pred_proba_cls, axis=1)
 
-    # Узагальнені мультикласові метрики (accuracy та macro-F1)
+    # Aggregate multiclass metrics (accuracy and macro-F1)
     cls_acc = accuracy_mc(y_pred_proba_cls, cls_ds.y_val)
     cls_macro_f1 = macro_f1_mc(y_pred_proba_cls, cls_ds.y_val)
 
-    # Confusion matrix (рядки — істинні класи, стовпці — передбачені)
+    # Confusion matrix (rows — true classes, columns — predicted)
     n_classes = cls_ds.y_val.shape[1]
     cm = np.zeros((n_classes, n_classes), dtype=int)
     for t, p in zip(y_true_cls, y_pred_cls):
@@ -513,21 +513,21 @@ def main():
     for line in cls_lines:
         print(line)
 
-    # 7) Збереження моделей (ваг та архітектури) у .npz
+    # 7) Save models (weights and architecture) to .npz
     if SAVE_MODELS:
         det_model_path = os.path.join(MODELS_DIR, det_base + ".npz")
         cls_model_path = os.path.join(MODELS_DIR, cls_base + ".npz")
         det_net.save(det_model_path)
         cls_net.save(cls_model_path)
 
-    # 8) Логи навчання (конфіг + історія + підсумкові метрики)
+    # 8) Training logs (config + history + final metrics)
     if SAVE_LOGS:
         det_log_path = os.path.join(LOGS_DIR, det_base + ".txt")
         cls_log_path = os.path.join(LOGS_DIR, cls_base + ".txt")
         save_log_txt(det_log_path, "DETECTOR", det_arch, det_history, det_lines, True)
         save_log_txt(cls_log_path, "CLASSIFIER", cls_arch, cls_history, cls_lines, False)
 
-    # 9) Графіки по історії навчання
+    # 9) Plots from training history
     if SAVE_PLOTS and PLOT_DETECTOR:
         plot_history(det_history, det_base, PLOTS_DIR)
     if SAVE_PLOTS and PLOT_CLASSIFIER:
@@ -535,6 +535,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Точка входу — запускаємо main() тільки якщо файл запускається напряму,
-    # а не імпортується як модуль.
+    # Entry point — run main() only if the file is executed directly,
+    # not imported as a module.
     main()

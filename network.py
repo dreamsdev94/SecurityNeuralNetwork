@@ -6,7 +6,7 @@ from metrics import accuracy_mc, macro_f1_mc
 # GPU / CPU backend with runtime switch
 # ============================================================
 
-# За замовчуванням — CPU; у main.py викликаємо set_backend(...)
+# By default — CPU; in main.py we call set_backend(...)
 import numpy as xp  # type: ignore
 BACKEND = "CPU (NumPy)"
 USE_GPU = False
@@ -15,15 +15,15 @@ GPU_AVAILABLE = False
 
 def set_backend(use_gpu: bool = False):
     """
-    Перемикач між NumPy (CPU) та CuPy (GPU).
+    Switch between NumPy (CPU) and CuPy (GPU).
 
-    Використання:
+    Usage:
         from network import set_backend
-        set_backend(True)   # спробувати GPU (CuPy)
-        set_backend(False)  # примусово CPU
+        set_backend(True)   # try GPU (CuPy)
+        set_backend(False)  # force CPU
 
-    Якщо GPU недоступний або стається помилка імпорту cupy, мережа
-    автоматично переходить на NumPy (CPU).
+    If the GPU is unavailable or an error occurs when importing cupy, the network
+    automatically falls back to NumPy (CPU).
     """
     global xp, BACKEND, USE_GPU, GPU_AVAILABLE
 
@@ -36,7 +36,7 @@ def set_backend(use_gpu: bool = False):
             BACKEND = "GPU (CuPy)"
             GPU_AVAILABLE = True
         except Exception:
-            # У випадку будь-якої помилки — fallback на NumPy
+            # In case of any error — fallback to NumPy
             import numpy as _np  # type: ignore
             xp = _np
             BACKEND = "CPU (NumPy)"
@@ -56,14 +56,14 @@ def set_backend(use_gpu: bool = False):
 
 class Network:
     """
-    Багатошарова повнозв'язна нейромережа з підтримкою:
-      - різних ініціалізацій ваг (Xavier/He/уніформ);
-      - активацій (ReLU, tanh, sigmoid, GELU, softmax);
-      - LayerNorm на прихованих шарах;
-      - функцій втрат (BCE, CE, MSE);
-      - оптимізатора Adam;
-      - ранньої зупинки та логування метрик;
-      - збереження/завантаження моделі у .npz.
+    A multilayer fully-connected neural network with support for:
+      - different weight initializations (Xavier/He/uniform);
+      - activations (ReLU, tanh, sigmoid, GELU, softmax);
+      - LayerNorm on hidden layers;
+      - loss functions (BCE, CE, MSE);
+      - Adam optimizer;
+      - early stopping and metric logging;
+      - saving/loading the model to/from .npz.
     """
 
     # --------------------- INITIALIZATIONS ---------------------
@@ -71,13 +71,13 @@ class Network:
     @staticmethod
     def init_weights(fan_in, fan_out, method: str = "xavier_normal"):
         """
-        Ініціалізація ваг для шару розміром fan_in x fan_out.
+        Weight initialization for a layer of size fan_in x fan_out.
 
         method:
-          - "xavier_uniform" : U(-a, a), де a = sqrt(6 / (fan_in + fan_out))
+          - "xavier_uniform" : U(-a, a), where a = sqrt(6 / (fan_in + fan_out))
           - "xavier_normal"  : N(0, 2 / (fan_in + fan_out))
           - "he"             : N(0, 2 / fan_in)
-          - інше             : рівномірний розподіл [-1, 1]
+          - other            : uniform distribution [-1, 1]
         """
         if method == "xavier_uniform":
             limit = np.sqrt(6.0 / (fan_in + fan_out))
@@ -89,10 +89,10 @@ class Network:
             scale = np.sqrt(2.0 / fan_in)
             w = np.random.randn(fan_in, fan_out) * scale
         else:
-            # випадкова ініціалізація в діапазоні [-1, 1]
+            # random initialization in the range [-1, 1]
             w = xp.random.uniform(-1.0, 1.0, (fan_in, fan_out))
 
-        # Переводимо масив у поточний backend (xp = np або cupy)
+        # Convert the array to the current backend (xp = np or cupy)
         return xp.asarray(w, dtype=xp.float32)
 
     # ------------------------ ACTIVATIONS ------------------------
@@ -104,7 +104,7 @@ class Network:
 
     @staticmethod
     def relu_deriv(x):
-        # d/dx ReLU(x): 1 для x>0, 0 інакше
+        # d/dx ReLU(x): 1 for x>0, 0 otherwise
         return (x > 0).astype(xp.float32)
 
     @staticmethod
@@ -113,7 +113,7 @@ class Network:
 
     @staticmethod
     def tanh_deriv(a):
-        # a = tanh(x), тому похідна = 1 - a^2
+        # a = tanh(x), so the derivative = 1 - a^2
         return 1 - a * a
 
     @staticmethod
@@ -123,24 +123,24 @@ class Network:
 
     @staticmethod
     def sigmoid_deriv(a):
-        # a = sigmoid(x), тому похідна = a * (1 - a)
+        # a = sigmoid(x), so the derivative = a * (1 - a)
         return a * (1 - a)
 
     @staticmethod
     def gelu(x):
         """
-        GELU-активація у апроксимації:
+        GELU activation (approximation):
         0.5 * x * (1 + tanh( sqrt(2/pi) * (x + 0.044715 * x^3) ))
         """
-        # використовую np для констант, xp для тензорів
+        # use np for constants, xp for tensors
         c = np.sqrt(2.0 / np.pi)
         return 0.5 * x * (1 + xp.tanh(c * (x + 0.044715 * x ** 3)))
 
     @staticmethod
     def gelu_deriv(x):
         """
-        Похідна від GELU (для backprop).
-        Формула реалізована через диференціювання апроксимації вище.
+        Derivative of GELU (for backprop).
+        The formula is implemented by differentiating the approximation above.
         """
         c = np.sqrt(2.0 / np.pi)
         t = xp.tanh(c * (x + 0.044715 * x ** 3))
@@ -150,8 +150,8 @@ class Network:
     @staticmethod
     def softmax(x):
         """
-        Softmax по останньому виміру (axis=1) з попереднім зсувом
-        (віднімання максимуму) для числової стабільності.
+        Softmax over the last dimension (axis=1) with a prior shift
+        (subtracting the maximum) for numerical stability.
         """
         x = x - xp.max(x, axis=1, keepdims=True)
         e = xp.exp(x)
@@ -162,12 +162,12 @@ class Network:
     @staticmethod
     def layer_norm_forward(Z, eps=1e-5):
         """
-        Прямий прохід Layer Normalization для одного шару.
+        Forward pass of Layer Normalization for one layer.
 
         Z: (batch, features)
-        Повертає:
-          Z_norm — нормалізований тензор
-          mean, var, std — статистики по features (axis=1) для backprop
+        Returns:
+          Z_norm — normalized tensor
+          mean, var, std — statistics over features (axis=1) for backprop
         """
         mean = Z.mean(axis=1, keepdims=True)
         var = ((Z - mean) ** 2).mean(axis=1, keepdims=True)
@@ -178,12 +178,12 @@ class Network:
     @staticmethod
     def layer_norm_backward(dZ_norm, Z, mean, var, std, eps=1e-5):
         """
-        Зворотний прохід для Layer Normalization.
+        Backward pass for Layer Normalization.
 
-        dZ_norm — градієнт по нормалізованому виходу Z_norm.
-        На виході: dZ — градієнт по вхідному Z.
+        dZ_norm — gradient w.r.t. the normalized output Z_norm.
+        Output: dZ — gradient w.r.t. the input Z.
         """
-        # Кількість ознак (features) для нормалізації
+        # Number of features for normalization
         N = Z.shape[1]
         Z_centered = Z - mean
 
@@ -207,7 +207,7 @@ class Network:
     @staticmethod
     def bce_loss(y, yhat):
         """
-        Бінарна крос-ентропія:
+        Binary cross-entropy:
         L = - mean( y * log(yhat) + (1 - y) * log(1 - yhat) )
         """
         eps = 1e-9
@@ -218,22 +218,22 @@ class Network:
     @staticmethod
     def bce_grad(y, yhat):
         """
-        Градієнт bce_loss по виходу yhat.
+        Gradient of bce_loss w.r.t. the output yhat.
 
-        Для sigmoid-виходу і BCE втрати у поєднанні з backprop:
+        For a sigmoid output and BCE loss combined with backprop:
           dL/dZ = (yhat - y) / N
-        Ми тут повертаємо dL/dA (A = yhat), так щоб після множення
-        на похідну sigmoid (A * (1 - A)) вийшло потрібне (yhat - y) / N.
+        Here we return dL/dA (A = yhat), so that after multiplying
+        by the sigmoid derivative (A * (1 - A)) we obtain (yhat - y) / N.
         """
         eps = 1e-9
         N = y.shape[0]
-        # dL/dA, щоб після множення на похідну sigmoid вийшло (yhat - y) / N
+        # dL/dA so that after multiplying by the sigmoid derivative we get (yhat - y) / N
         return (yhat - y) / ((yhat * (1 - yhat)) + eps) / max(N, 1)
 
     @staticmethod
     def ce_loss(y, yhat):
         """
-        Крос-ентропія для мультикласового випадку (one-hot y):
+        Cross-entropy for the multiclass case (one-hot y):
         L = - mean( sum_c y_c * log(yhat_c) )
         """
         eps = 1e-9
@@ -242,14 +242,14 @@ class Network:
     @staticmethod
     def ce_grad(y, yhat):
         """
-        Градієнт від CE + softmax:
-        dL/dZ = (yhat - y) / N, тому тут повертаємо саме таку форму.
+        Gradient of CE + softmax:
+        dL/dZ = (yhat - y) / N, so here we return exactly that form.
         """
         return (yhat - y) / y.shape[0]
 
     @staticmethod
     def mse_loss(y, yhat):
-        # Середньоквадратична помилка: mean( (yhat - y)^2 )
+        # Mean squared error: mean( (yhat - y)^2 )
         return float(xp.mean((yhat - y) ** 2))
 
     # ------------------------ Constructor ------------------------
@@ -260,23 +260,23 @@ class Network:
                  use_layernorm: bool = True,
                  ln_every_k: int = 1):
         """
-        layers: список розмірів шарів, напр. [105, 512, 256, 1]
-        use_layernorm: чи використовувати LayerNorm на прихованих шарах
-        ln_every_k: LayerNorm на кожному k-му шарі (1 = кожен шар,
-                    2 = кожен другий, <=0 = вимкнути LN)
+        layers: list of layer sizes, e.g. [105, 512, 256, 1]
+        use_layernorm: whether to use LayerNorm on hidden layers
+        ln_every_k: apply LayerNorm on every k-th layer (1 = every layer,
+                    2 = every second, <=0 = disable LN)
         """
         self.layers = layers
         self.init_method = init
         self.params = {}  # W_i, b_i
-        self.cache = {}   # проміжні значення для backprop
-        self.m = {}       # перший момент для Adam
-        self.v = {}       # другий момент для Adam
-        self.t = 0        # крок для Adam
+        self.cache = {}   # intermediate values for backprop
+        self.m = {}       # first moment for Adam
+        self.v = {}       # second moment for Adam
+        self.t = 0        # Adam step
 
         self.use_layernorm = bool(use_layernorm)
         self.ln_every_k = int(ln_every_k) if ln_every_k is not None else 0
 
-        # Ініціалізація ваг та моментів
+        # Initialize weights and moments
         for i in range(1, len(layers)):
             fan_in = layers[i - 1]
             fan_out = layers[i]
@@ -293,8 +293,8 @@ class Network:
 
     def _use_ln_for_layer(self, i: int) -> bool:
         """
-        Перевіряє, чи потрібно застосовувати LayerNorm для шару номер i.
-        LN ставимо тільки на приховані шари згідно з ln_every_k.
+        Checks whether LayerNorm should be applied for layer number i.
+        LN is applied only to hidden layers according to ln_every_k.
         """
         if not self.use_layernorm:
             return False
@@ -306,21 +306,21 @@ class Network:
 
     def forward(self, X, hidden_act="relu", output_act="sigmoid"):
         """
-        Прямий прохід мережі.
+        Forward pass of the network.
 
-        hidden_act  — активація на прихованих шарах
-        output_act  — активація вихідного шару
+        hidden_act  — activation on hidden layers
+        output_act  — activation of the output layer
         """
         A = X
         self.cache = {"A0": A}
-        L = len(self.layers) - 1  # кількість шарів з вагами
+        L = len(self.layers) - 1  # number of layers with weights
 
         for i in range(1, L + 1):
-            # Лінійна частина: Z_raw = A_{i-1} * W_i + b_i
+            # Linear part: Z_raw = A_{i-1} * W_i + b_i
             Z_raw = A @ self.params[f"W{i}"] + self.params[f"b{i}"]
             self.cache[f"Z_raw{i}"] = Z_raw
 
-            if i == L:  # вихідний шар без LayerNorm
+            if i == L:  # output layer without LayerNorm
                 if output_act == "sigmoid":
                     A = Network.sigmoid(Z_raw)
                 elif output_act == "softmax":
@@ -332,14 +332,14 @@ class Network:
                 elif output_act == "gelu":
                     A = Network.gelu(Z_raw)
                 else:
-                    # Лінійний вихід (без активації)
+                    # Linear output (no activation)
                     A = Z_raw
                 self.cache[f"A{i}"] = A
                 return A
 
-            # приховані шари: з LayerNorm або без
+            # hidden layers: with LayerNorm or without
             if self._use_ln_for_layer(i):
-                # LN по features всередині батчу
+                # LN over features within the batch
                 Z_norm, mean, var, std = Network.layer_norm_forward(Z_raw)
                 self.cache[f"LN_mean{i}"] = mean
                 self.cache[f"LN_var{i}"] = var
@@ -348,7 +348,7 @@ class Network:
                 Z_norm = Z_raw
             self.cache[f"Z{i}"] = Z_norm
 
-            # Нелінійність на прихованому шарі
+            # Nonlinearity on the hidden layer
             if hidden_act == "relu":
                 A = Network.relu(Z_norm)
             elif hidden_act == "gelu":
@@ -358,7 +358,7 @@ class Network:
             elif hidden_act == "sigmoid":
                 A = Network.sigmoid(Z_norm)
             else:
-                # Якщо активація не задана — лишаємо лінійну
+                # If activation is not set — keep it linear
                 A = Z_norm
 
             self.cache[f"A{i}"] = A
@@ -372,16 +372,16 @@ class Network:
                  output_act="sigmoid",
                  loss_fn="bce"):
         """
-        Зворотний прохід (backpropagation).
+        Backward pass (backpropagation).
 
-        y      — істинні значення
-        yhat   — вихід мережі з forward()
-        loss_fn — "bce", "ce" або "mse" (визначає dL/dA для вихідного шару)
+        y      — ground-truth values
+        yhat   — network output from forward()
+        loss_fn — "bce", "ce" or "mse" (defines dL/dA for the output layer)
         """
         grads = {}
         L = len(self.layers) - 1
 
-        # dA від функції втрат (градієнт по виходу останнього шару)
+        # dA from the loss function (gradient w.r.t. the output of the last layer)
         if loss_fn == "bce":
             dA = Network.bce_grad(y, yhat)
         elif loss_fn == "ce":
@@ -389,13 +389,13 @@ class Network:
         else:  # mse
             dA = (yhat - y) * 2.0 / y.shape[0]
 
-        # Проходимо шари у зворотному порядку: L, L-1, ..., 1
+        # Traverse layers in reverse order: L, L-1, ..., 1
         for i in reversed(range(1, L + 1)):
             A_prev = self.cache[f"A{i-1}"]
             Z_raw = self.cache[f"Z_raw{i}"]
 
             if i == L:
-                # Вихідний шар: залежимо від вибраної активації
+                # Output layer: depends on the chosen activation
                 if output_act == "sigmoid":
                     dZ = dA * Network.sigmoid_deriv(yhat)
                 elif output_act == "tanh":
@@ -405,16 +405,16 @@ class Network:
                 elif output_act == "gelu":
                     dZ = dA * Network.gelu_deriv(Z_raw)
                 elif output_act == "softmax":
-                    # Для softmax + CE: dZ = (yhat - y) / N уже враховано
+                    # For softmax + CE: dZ = (yhat - y) / N is already accounted for
                     dZ = dA
                 else:
-                    # Лінійний вихід без активації
+                    # Linear output without activation
                     dZ = dA
             else:
-                # Приховані шари
+                # Hidden layers
                 Z_norm = self.cache[f"Z{i}"]
 
-                # dA -> dZ_norm через похідну активації
+                # dA -> dZ_norm through the activation derivative
                 if hidden_act == "relu":
                     dZ_norm = dA * Network.relu_deriv(Z_norm)
                 elif hidden_act == "gelu":
@@ -426,8 +426,8 @@ class Network:
                 else:
                     dZ_norm = dA
 
-                # якщо на цьому шарі була LayerNorm — робимо LN backward,
-                # інакше просто dZ = dZ_norm
+                # if LayerNorm was used on this layer — do LN backward,
+                # otherwise just dZ = dZ_norm
                 if self._use_ln_for_layer(i):
                     mean = self.cache[f"LN_mean{i}"]
                     var = self.cache[f"LN_var{i}"]
@@ -436,11 +436,11 @@ class Network:
                 else:
                     dZ = dZ_norm
 
-            # Градієнти по W_i та b_i
+            # Gradients w.r.t. W_i and b_i
             grads[f"W{i}"] = A_prev.T @ dZ
             grads[f"b{i}"] = xp.sum(dZ, axis=0, keepdims=True)
 
-            # dA для попереднього шару (i-1)
+            # dA for the previous layer (i-1)
             dA = dZ @ self.params[f"W{i}"].T
 
         return grads
@@ -449,26 +449,26 @@ class Network:
 
     def adam_update(self, grads, lr, beta1=0.9, beta2=0.999, eps=1e-8):
         """
-        Оновлення параметрів за алгоритмом Adam.
+        Update parameters using the Adam algorithm.
 
-        grads — словник градієнтів для W_i, b_i
+        grads — gradient dictionary for W_i, b_i
         lr    — learning rate
         """
-        self.t += 1  # крок оптимізатора
+        self.t += 1  # optimizer step
 
         for key in grads:
-            # Оновлення перших і других моментів
+            # Update first and second moments
             self.m[key] = beta1 * self.m[key] + (1 - beta1) * grads[key]
             self.v[key] = beta2 * self.v[key] + (1 - beta2) * (grads[key] ** 2)
 
-            # Корекція зміщення (bias correction)
+            # Bias correction
             m_hat = self.m[key] / (1 - beta1 ** self.t)
             v_hat = self.v[key] / (1 - beta2 ** self.t)
 
-            # Оновлення параметрів
+            # Parameter update
             self.params[key] -= lr * m_hat / (xp.sqrt(v_hat) + eps)
 
-    # ------------------------ FIT (батчі + метрики + логування) ------------------------
+    # ------------------------ FIT (batches + metrics + logging) ------------------------
 
     def fit(self,
             Xtr, Ytr,
@@ -491,17 +491,17 @@ class Network:
             plot_metrics: bool = False,
             plots_dir: str | None = None):
         """
-        Основний цикл навчання моделі.
+        Main training loop.
 
-        Виконує:
-          - міні-батчеве навчання (перемішування індексів);
-          - підрахунок втрати й метрик на train/val;
-          - early stopping по val_loss;
-          - опціональне збереження моделі та логів;
-          - опціональну побудову графіків метрик.
+        Performs:
+          - mini-batch training (shuffling indices);
+          - loss and metric computation on train/val;
+          - early stopping based on val_loss;
+          - optional saving of the model and logs;
+          - optional plotting of metric curves.
         """
 
-        # переносимо на GPU, якщо треба
+        # move to GPU if needed
         if GPU_AVAILABLE:
             Xtr = xp.asarray(Xtr, dtype=xp.float32)
             Ytr = xp.asarray(Ytr, dtype=xp.float32)
@@ -510,10 +510,10 @@ class Network:
 
         n_train = Xtr.shape[0]
 
-        # детектор: (N,) або (N,1); класифікатор: (N, C) з C>1
+        # detector: (N,) or (N,1); classifier: (N, C) with C>1
         is_binary = (Ytr.ndim == 1) or (Ytr.ndim == 2 and Ytr.shape[1] == 1)
 
-        # Історія метрик для побудови графіків / аналізу
+        # Metric history for plotting / analysis
         if is_binary:
             history = {
                 "epoch": [],
@@ -533,15 +533,15 @@ class Network:
                 "val_macro_f1": [],
             }
 
-        # лог у пам'яті (для запису в .txt наприкінці)
+        # in-memory log (to write to .txt at the end)
         log_lines = []
 
-        # базова назва файлів: <type>_h<кількість прихованих шарів>
+        # base filename: <type>_h<number of hidden layers>
         hidden_layers = max(0, len(self.layers) - 2)
         mt = model_type if model_type is not None else "model"
         base_name = f"{mt}_h{hidden_layers}"
 
-        # ------------------------ ЕПОХА 0: метрики ДО навчання ------------------------
+        # ------------------------ EPOCH 0: metrics BEFORE training ------------------------
 
         # train loss @ epoch 0
         out_tr0 = self.forward(Xtr, hidden_activation, output_activation)
@@ -561,7 +561,7 @@ class Network:
         else:
             val_loss0 = Network.mse_loss(Yva, out_va0)
 
-        # метрики на валідації @ epoch 0
+        # validation metrics @ epoch 0
         if GPU_AVAILABLE:
             y_true_val0 = np.asarray(Yva.get())
             y_pred_val0 = np.asarray(out_va0.get())
@@ -574,7 +574,7 @@ class Network:
         history["val_loss"].append(float(val_loss0))
 
         if is_binary:
-            # Для бінарного випадку вважаємо поріг 0.5
+            # For the binary case we use a 0.5 threshold
             y_true_flat0 = y_true_val0.reshape(-1).astype(int)
             y_pred_flat0 = y_pred_val0.reshape(-1)
             preds0 = (y_pred_flat0 >= 0.5).astype(int)
@@ -606,7 +606,7 @@ class Network:
                 f"val_f1={f10:.4f}"
             )
         else:
-            # мультикласові метрики (accuracy + macro-F1)
+            # multiclass metrics (accuracy + macro-F1)
             acc0 = accuracy_mc(y_pred_val0, y_true_val0)
             macro_f10 = macro_f1_mc(y_pred_val0, y_true_val0)
 
@@ -625,32 +625,32 @@ class Network:
             print(msg0)
         log_lines.append(msg0 + "\n")
 
-        # ------------- ініціалізація early stopping базою (епоха 0) -------------
-        best_val = float(val_loss0)  # найкраща поки що val_loss
-        no_imp = 0                   # скільки епох без покращення
-        # Зберігаємо копію найкращих параметрів на CPU
+        # ------------- initialize early stopping baseline (epoch 0) -------------
+        best_val = float(val_loss0)  # best val_loss so far
+        no_imp = 0                   # number of epochs without improvement
+        # Store a copy of the best parameters on CPU
         best_params = {
             k: (v.get() if GPU_AVAILABLE else np.array(v, copy=True))
             for k, v in self.params.items()
         }
 
-        # ------------------------ ТРЕНУВАННЯ (епохи 1..max_epochs) ------------------------
+        # ------------------------ TRAINING (epochs 1..max_epochs) ------------------------
 
         for epoch in range(1, max_epochs + 1):
-            # --------- TRAIN: стандартні перемішані міні-батчі ---------
+            # --------- TRAIN: standard shuffled mini-batches ---------
             idx = xp.random.permutation(n_train)
             train_loss_sum = 0.0
-            seen = 0  # скільки об'єктів пройшло через batched training
+            seen = 0  # number of samples processed by batched training
 
             for start in range(0, n_train, batch_size):
                 batch_idx = idx[start:start + batch_size]
                 Xb = Xtr[batch_idx]
                 Yb = Ytr[batch_idx]
 
-                # Прямий прохід на міні-батчі
+                # Forward pass on the mini-batch
                 out = self.forward(Xb, hidden_activation, output_activation)
 
-                # Обчислення втрати на батчі
+                # Compute batch loss
                 if loss == "bce":
                     L_batch = Network.bce_loss(Yb, out)
                 elif loss == "ce":
@@ -662,7 +662,7 @@ class Network:
                 train_loss_sum += L_batch * bs
                 seen += bs
 
-                # Зворотній прохід і оновлення ваг
+                # Backward pass and weight update
                 grads = self.backward(Yb, out,
                                       hidden_activation,
                                       output_activation,
@@ -671,14 +671,14 @@ class Network:
                 if optimizer == "adam":
                     self.adam_update(grads, lr)
                 else:
-                    # Простий SGD, якщо Adam не обрано
+                    # Simple SGD if Adam is not selected
                     for k in self.params:
                         self.params[k] -= lr * grads[k]
 
-            # Середня train_loss за епоху
+            # Average train_loss for the epoch
             train_loss = train_loss_sum / max(seen, 1)
 
-            # --------- VALIDATION + МЕТРИКИ ---------
+            # --------- VALIDATION + METRICS ---------
             out_va = self.forward(Xva, hidden_activation, output_activation)
 
             if loss == "ce":
@@ -688,7 +688,7 @@ class Network:
             else:
                 val_loss = Network.mse_loss(Yva, out_va)
 
-            # переводимо на CPU для metrics.py
+            # move to CPU for metrics.py
             if GPU_AVAILABLE:
                 y_true_val = np.asarray(Yva.get())
                 y_pred_val = np.asarray(out_va.get())
@@ -701,7 +701,7 @@ class Network:
             history["val_loss"].append(float(val_loss))
 
             if is_binary:
-                # Бінарні метрики
+                # Binary metrics
                 y_true_flat = y_true_val.reshape(-1).astype(int)
                 y_pred_flat = y_pred_val.reshape(-1)
 
@@ -735,7 +735,7 @@ class Network:
                     f"val_f1={f1_val:.4f}"
                 )
             else:
-                # мультикласові метрики
+                # multiclass metrics
                 val_acc = accuracy_mc(y_pred_val, y_true_val)
                 val_macro_f1 = macro_f1_mc(y_pred_val, y_true_val)
 
@@ -754,18 +754,18 @@ class Network:
                 print(msg)
             log_lines.append(msg + "\n")
 
-            # --------- Early stopping по val_loss з чекпоінтом ---------
-            # 1) Завжди оновлюємо best_params, якщо val_loss покращився
+            # --------- Early stopping by val_loss with checkpointing ---------
+            # 1) Always update best_params if val_loss improved
             if val_loss + min_delta < best_val:
                 best_val = float(val_loss)
                 no_imp = 0
-                # зберігаємо ваги на CPU як numpy
+                # store weights on CPU as numpy
                 best_params = {
                     k: (v.get() if GPU_AVAILABLE else np.array(v, copy=True))
                     for k, v in self.params.items()
                 }
             else:
-                # 2) Лічильник patience використовуємо тільки, якщо рання зупинка увімкнена
+                # 2) Use the patience counter only if early stopping is enabled
                 if early_stopping:
                     no_imp += 1
                     if no_imp >= patience:
@@ -773,7 +773,7 @@ class Network:
                         if debug_show:
                             print(es_msg)
                         log_lines.append(es_msg + "\n")
-                        # відновлюємо найкращі ваги
+                        # restore the best weights
                         if best_params is not None:
                             for k in self.params:
                                 self.params[k] = xp.asarray(
@@ -781,24 +781,24 @@ class Network:
                                 )
                         break
 
-        # якщо early stopping не спрацював, але best_params був — теж повертаємо найкращі
+        # if early stopping did not trigger, but best_params exists — still restore the best ones
         if best_params is not None:
             for k in self.params:
                 self.params[k] = xp.asarray(best_params[k], dtype=xp.float32)
 
-        # ------------------------ ЗБЕРЕЖЕННЯ МОДЕЛІ ТА ЛОГІВ ------------------------
+        # ------------------------ SAVE MODEL AND LOGS ------------------------
 
         if save_model:
-            # підготуємо директорії
+            # prepare directories
             if log_dir is None:
                 log_dir = "."
             os.makedirs(log_dir, exist_ok=True)
 
-            # шлях до моделі
+            # model path
             model_path = os.path.join(log_dir, base_name + ".npz")
             self.save(model_path)
 
-            # шлях до текстового логу
+            # text log path
             log_path = os.path.join(log_dir, base_name + ".txt")
 
             with open(log_path, "w", encoding="utf-8") as f:
@@ -820,12 +820,12 @@ class Network:
                 for line in log_lines:
                     f.write(line)
 
-        # ------------------------ ПОБУДОВА ТА ЗБЕРЕЖЕННЯ ГРАФІКІВ ------------------------
+        # ------------------------ PLOT AND SAVE METRIC CURVES ------------------------
 
         if plot_metrics:
-            import matplotlib.pyplot as plt  # локальний імпорт
+            import matplotlib.pyplot as plt  # local import
 
-            # директорія для графіків
+            # directory for plots
             if plots_dir is None:
                 base_plots_dir = log_dir if log_dir is not None else "."
                 plots_dir = os.path.join(base_plots_dir, "plots")
@@ -845,7 +845,7 @@ class Network:
             plt.savefig(loss_path)
             plt.close()
 
-            # 2) Інші метрики
+            # 2) Other metrics
             if is_binary:
                 plt.figure()
                 plt.plot(epochs, history["val_acc"], label="val_acc")
@@ -875,8 +875,8 @@ class Network:
 
     def predict(self, X, hidden_activation="relu", output_activation="sigmoid"):
         """
-        Інференс (прямий прохід) без навчання.
-        Повертає numpy-масив навіть при використанні GPU.
+        Inference (forward pass) without training.
+        Returns a numpy array even when using the GPU.
         """
         if GPU_AVAILABLE:
             X = xp.asarray(X, dtype=xp.float32)
@@ -887,20 +887,20 @@ class Network:
 
     def save(self, filepath: str):
         """
-        Зберегти модель у .npz файл:
+        Save the model to a .npz file:
           - layers
           - use_layernorm, ln_every_k
-          - всі W_i, b_i
+          - all W_i, b_i
 
-        filepath — повний шлях з розширенням, напр. "detector_40layers.npz"
+        filepath — full path including extension, e.g. "detector_40layers.npz"
         """
-        # ваги на CPU
+        # weights on CPU
         params_cpu = {
             k: (v.get() if GPU_AVAILABLE else np.asarray(v))
             for k, v in self.params.items()
         }
 
-        # Метадані моделі
+        # Model metadata
         meta = {
             "layers": np.asarray(self.layers, dtype=np.int32),
             "use_layernorm": np.asarray(
@@ -914,16 +914,16 @@ class Network:
     @classmethod
     def from_file(cls, filepath: str):
         """
-        Створити екземпляр Network із файла, збереженого методом save().
+        Create a Network instance from a file saved with save().
 
-        УВАГА: перед викликом бажано зробити set_backend(USE_GPU), щоб
-        ваги одразу опинилися на потрібному бекенді (CPU/GPU).
+        NOTE: before calling, it is recommended to run set_backend(USE_GPU) so that
+        weights are placed on the desired backend (CPU/GPU) immediately.
         """
         with np.load(filepath, allow_pickle=False) as data:
             if "layers" not in data:
                 raise ValueError("Saved model file does not contain 'layers' array.")
 
-            # Відновлюємо архітектуру
+            # Restore the architecture
             layers = data["layers"].astype(int).tolist()
 
             use_ln = True
@@ -933,10 +933,10 @@ class Network:
             if "ln_every_k" in data:
                 ln_k = int(data["ln_every_k"][0])
 
-            # Створюємо мережу з тими ж налаштуваннями LN
+            # Create the network with the same LN settings
             net = cls(layers, init="he", use_layernorm=use_ln, ln_every_k=ln_k)
 
-            # завантажуємо ваги
+            # load weights
             for key in net.params.keys():
                 if key not in data.files:
                     raise ValueError(f"Parameter '{key}' not found in file.")

@@ -1,0 +1,29 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local outputs
+logs/
+plots/
+models/
+datasets_npz/
+*.npz
+
+# Data (якщо CSV великі або приватні — краще не пушити)
+*.csv
